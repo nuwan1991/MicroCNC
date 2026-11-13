@@ -143,7 +143,9 @@ class AutoLevelPanel(QWidget):
         ready = (c.connected and not c.link.released and not c.job_active
                  and not self.running)
         for b in (self.probe_here_btn, self.zero_probe_btn):
-            b.setEnabled(ready)
+            # also during a paused job: tool change -> Probe + set Z 0
+            b.setEnabled(c.connected and not c.link.released and not self.running
+                         and (not c.job_active or c.job_paused))
         self.touch_btn.setEnabled(c.connected and not self.running)
         self.start_btn.setEnabled(ready and c.position_valid)
         self.stop_btn.setEnabled(self.running)

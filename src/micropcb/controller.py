@@ -17,7 +17,7 @@ from typing import Callable
 import numpy as np
 
 from .gcode import Program, parse
-from .job import Job
+from .job import PAUSED_STATE, Job
 from .autolevel import HeightMap, probe_order
 from .jog import jog_ticks, pack
 from .protocol import HEADER_JOG, Tick, encode_packet
@@ -201,8 +201,8 @@ class MachineController:
             raise RuntimeError("not connected")
         if self.link.released:
             raise RuntimeError("motors released - press the release button again")
-        if not allow_job and self.job_active:
-            raise RuntimeError("a job is running - stop it first")
+        if not allow_job and self.job_active and not self.job_paused:
+            raise RuntimeError("a job is running - pause or stop it first")
 
     def jog(self, axis: str, mm: float, steps_per_tick: int | None = None) -> float:
         """Relative jog; returns the distance actually commanded (after limits)."""
@@ -340,6 +340,8 @@ class MachineController:
         Start with the tool above the first point area, at most first_travel_mm
         above the copper. Work Z 0 is set to the copper at the first point.
         """
+        if self.job_active:
+            raise RuntimeError("stop the job before measuring a height map")
         self._require_ready()
         if not self.position_valid:
             raise RuntimeError("position is not reliable - set work zero first")
@@ -389,7 +391,14 @@ class MachineController:
         if self.job_active:
             self.job.fail(reason)  # type: ignore[union-attr]
 
+    @property
+    def job_paused(self) -> bool:
+        return self.job is not None and self.job.state == PAUSED_STATE
+
     def _on_job(self, job: Job) -> None:
+        if job.state == PAUSED_STATE:
+            # remember where we left the path (tool change: user may jog / re-zero Z)
+            self._pause_offset = list(self.state.work_offset)
         if not job.active:
             self.save_state()
         self._emit(EV_JOB, job)
@@ -426,6 +435,8 @@ class MachineController:
 
     def start_job(self, text: str, name: str = "job") -> Job:
         """Parse, check and start a G-code job from the current position."""
+        if self.job_active:
+            raise RuntimeError("a job is already active")
         self._require_ready()
         if self.busy():
             raise RuntimeError("machine is moving - wait until it is idle")
@@ -448,9 +459,45 @@ class MachineController:
             self.job.pause()  # type: ignore[union-attr]
 
     def resume_job(self) -> None:
-        if self.job_active:
-            self._require_ready(allow_job=True)
-            self.job.resume()  # type: ignore[union-attr]
+        """Resume. If the tool was moved or Z re-zeroed during the pause (tool
+        change), first return to the path: Z up, X/Y back, Z down."""
+        if not self.job_active:
+            return
+        self._require_ready(allow_job=True)
+        job = self.job
+        if self.job_paused:
+            if self.busy() and not self.wait_idle(10):
+                raise RuntimeError("machine is still moving")
+            pl = job.planner  # type: ignore[union-attr]
+            old = getattr(self, "_pause_offset", None) or list(self.state.work_offset)
+            now = list(self.state.work_offset)
+            dz = now[2] - old[2]
+            if now[:2] != old[:2]:
+                self.state.work_offset[:2] = old[:2]   # X/Y zero must not change mid-job
+                self.probe_log.append("X/Y zero was changed during the pause - restored")
+            if dz:
+                pl.shift(0, 0, dz)                       # remaining path follows new Z zero
+                pl.cur[2] += dz
+                self._pause_offset = list(self.state.work_offset)
+            target = list(pl.cur)
+            pos = list(self.link.position)
+            if pos != target:
+                mm = self.mmps
+                safe = max(pos[2], target[2]) + round(self.settings.safe_height_mm / mm(2))
+                self._move_steps("z", safe - pos[2])
+                self._move_steps("x", target[0] - pos[0])
+                self._move_steps("y", target[1] - pos[1])
+                self._move_steps("z", target[2] - safe)
+                if not self.wait_idle(120):
+                    raise RuntimeError("return to the path did not finish")
+                pl.cur = list(self.link.position)
+        job.resume()  # type: ignore[union-attr]
+
+    def _move_steps(self, axis: str, steps: int) -> None:
+        if steps:
+            sp = self.link.spindle
+            self.link.send(pack(jog_ticks(axis, steps, self.settings.jog_steps_per_tick, sp),
+                                spindle=sp))
 
     def stop_job(self) -> None:
         if self.job_active:

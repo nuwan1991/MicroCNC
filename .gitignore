@@ -9,3 +9,6 @@ dist/
 
 # Original Wegstr software (third-party, not redistributed)
 Windows x64/
+
+# User board files (private, large)
+samples/

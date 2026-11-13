@@ -94,6 +94,16 @@ class Planner:
             yield TICK, Tick(spindle=False), last_line
         yield FINISHED, None, last_line
 
+    def shift(self, dx: int, dy: int, dz: int) -> None:
+        """Move the not-yet-executed path by whole steps (work zero changed
+        during a pause, e.g. Z re-zeroed after a tool change)."""
+        d = (dx * self.mmps[0], dy * self.mmps[1], dz * self.mmps[2])
+        self.offset_mm = [self.offset_mm[i] + d[i] for i in range(3)]
+        for kind, data in self._blocks:
+            if kind == "run":
+                for seg in data:
+                    seg.p0 = tuple(seg.p0[i] + d[i] for i in range(3))
+
     def estimate_ticks(self) -> int:
         """Ticks the job takes (pauses excluded). Uses a copy of this planner."""
         p = Planner(self.program, self.mmps, tuple(self.cur),  # type: ignore[arg-type]

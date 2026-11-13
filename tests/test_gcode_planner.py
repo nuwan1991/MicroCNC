@@ -293,3 +293,39 @@ def test_soft_limit_check_blocks_job(ctl):
     with pytest.raises(RuntimeError, match="outside"):
         ctl.start_job("G0 Z1")   # Z top is 0 at home
     ctl.start_job("G0 X5 Z-1")
+
+
+def test_tool_change_jog_rezero_and_return(ctl):
+    """M6 pause -> jog away, re-zero Z 0.5 mm higher -> resume returns to the
+    path and the rest of the job runs 0.5 mm (125 steps) higher."""
+    ctl.zero_axes()
+    job = ctl.start_job("G0 X5\nG1 Z-1 F60\nM6 (Change tool)\nG1 X10 F150\nG0 Z2")
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    assert job.message == "Change tool"
+    assert ctl.sim.pos == [1250, 0, -250]
+    ctl.jog("z", 10)                 # lift to change the tool
+    ctl.jog("x", -3)
+    ctl.wait_idle(10)
+    ctl.jog("z", -9.5)               # new tool touches 0.5 mm higher
+    ctl.wait_idle(10)
+    ctl.zero_axes("z")               # new tool on the copper -> work Z 0 here
+    before = list(ctl.state.work_offset)
+    ctl.resume_job()
+    assert _wait(lambda: job.state == DONE)
+    dz = before[2]                   # new Z zero in machine steps (old one was 0)
+    assert ctl.sim.pos[0] == 2500
+    # final G0 Z2 lands 2 mm above the NEW zero
+    assert ctl.sim.pos[2] == dz + 500
+
+
+def test_jog_allowed_only_when_paused(ctl):
+    ctl.zero_axes()
+    job = ctl.start_job("G0 X30\nM0\nG0 X0")
+    with pytest.raises(RuntimeError):
+        ctl.jog("y", 1)
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    ctl.jog("y", 1)
+    ctl.wait_idle(5)
+    ctl.resume_job()                 # returns Y to the path first
+    assert _wait(lambda: job.state == DONE)
+    assert ctl.sim.pos[:2] == [0, 0]

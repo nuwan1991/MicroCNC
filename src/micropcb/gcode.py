@@ -84,6 +84,7 @@ def parse(text: str, start: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> Pro
     lines = text.splitlines()
     prog.line_count = len(lines)
     for ln, raw in enumerate(lines, 1):
+        comment = " ".join(c.strip() for c in re.findall(r"\(([^)]*)\)", raw)).strip()
         s = _strip_comments(raw).strip().upper()
         if not s or s == "%":
             continue
@@ -151,11 +152,11 @@ def parse(text: str, start: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> Pro
                     spindle = False
                     prog.moves.append(Move(SPINDLE, ln, value=False))
             elif mi in (0, 1):
-                after.append(Move(PAUSE, ln, value=f"Program pause (M{mi})"))
+                after.append(Move(PAUSE, ln, value=comment or f"Program pause (M{mi})"))
             elif mi == 6:
                 t = vals.get("T")
-                after.append(Move(PAUSE, ln, value=(f"Change tool to T{int(t)}" if t is not None
-                                                    else "Change tool")))
+                after.append(Move(PAUSE, ln, value=comment or (
+                    f"Change tool to T{int(t)}" if t is not None else "Change tool")))
             elif mi in (2, 30):
                 after.append(Move(END, ln))
             elif mi in _IGNORED_M:

@@ -1,0 +1,444 @@
+"""PCB CAM (Stage 3.2–3.5): placed board -> G-code text.
+
+All geometry is in work coordinates (mm) from `PlacedBoard`; Z 0 = copper
+surface. Every operation returns an `OpResult` with G-code body lines, the
+paths (for preview / tests) and notes. `combine()` joins operations into one
+job with tool-change pauses (M6 + message) between different tools.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+
+import shapely
+from shapely.geometry import LineString, LinearRing, MultiLineString, Point, Polygon
+from shapely.ops import unary_union
+
+from .board import PlacedBoard, as_polygons
+from .excellon import Hole
+from .tools import DRILL, ENDMILL, VBIT, Tool
+
+RES = 16  # buffer quad segments
+
+
+@dataclass
+class OpResult:
+    name: str
+    tool: Tool
+    lines: list[str] = field(default_factory=list)       # G-code body (no header)
+    paths: list[list[tuple[float, float]]] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    problem_area: object = None                           # e.g. not-cleared copper gaps
+
+    @property
+    def empty(self) -> bool:
+        return not self.lines
+
+
+class _W:
+    """Small G-code writer that tracks the current position."""
+
+    def __init__(self, safe_z: float) -> None:
+        self.safe = safe_z
+        self.out: list[str] = []
+        self.z = None
+
+    def lift(self) -> None:
+        if self.z is None or self.z < self.safe - 1e-9:
+            self.out.append(f"G0 Z{self.safe:.3f}")
+            self.z = self.safe
+
+    def rapid_xy(self, x: float, y: float) -> None:
+        self.lift()
+        self.out.append(f"G0 X{x:.4f} Y{y:.4f}")
+
+    def plunge(self, z: float, feed: float) -> None:
+        if self.z is not None and self.z > 0.2:
+            self.out.append("G0 Z0.200")   # fast to just above the copper
+        self.out.append(f"G1 Z{z:.4f} F{feed:g}")
+        self.z = z
+
+    def cut(self, pts, feed: float, zs=None) -> None:
+        first = True
+        for k, (x, y) in enumerate(pts):
+            z = zs[k] if zs is not None else None
+            zpart = f" Z{z:.4f}" if z is not None and z != self.z else ""
+            if z is not None:
+                self.z = z
+            self.out.append(f"G1 X{x:.4f} Y{y:.4f}{zpart}" + (f" F{feed:g}" if first else ""))
+            first = False
+
+
+def _rings(geom) -> list[LinearRing]:
+    out = []
+    for p in as_polygons(geom):
+        out.append(p.exterior)
+        out.extend(p.interiors)
+    return out
+
+
+def _lines(geom) -> list[list[tuple[float, float]]]:
+    if geom is None or geom.is_empty:
+        return []
+    if isinstance(geom, (LineString, LinearRing)):
+        return [list(geom.coords)]
+    out = []
+    for g in getattr(geom, "geoms", []):
+        out.extend(_lines(g))
+    return out
+
+
+def _orient(ring: LinearRing, outer: bool, climb: bool) -> list[tuple[float, float]]:
+    """Climb milling with a CW spindle: outside contours CW, inside CCW."""
+    pts = list(ring.coords)
+    want_ccw = (not climb) if outer else climb
+    if LinearRing(pts).is_ccw != want_ccw:
+        pts.reverse()
+    return pts
+
+
+def _order(paths: list[list[tuple[float, float]]], start=(0.0, 0.0)):
+    """Nearest-neighbour order; closed paths may start at their nearest vertex."""
+    left = list(paths)
+    out = []
+    cur = start
+    while left:
+        best_i, best_d, best_k, best_rev = 0, float("inf"), 0, False
+        for i, p in enumerate(left):
+            closed = len(p) > 2 and p[0] == p[-1]
+            cands = range(len(p) - 1) if closed else (0, len(p) - 1)
+            step = max(1, (len(p) - 1) // 64) if closed else 1
+            for k in (cands if not closed else range(0, len(p) - 1, step)):
+                d = (p[k][0] - cur[0]) ** 2 + (p[k][1] - cur[1]) ** 2
+                if d < best_d:
+                    best_i, best_d, best_k, best_rev = i, d, k, (not closed and k != 0)
+        p = left.pop(best_i)
+        if len(p) > 2 and p[0] == p[-1] and best_k:
+            p = p[best_k:-1] + p[:best_k] + [p[best_k]]
+        elif best_rev:
+            p = p[::-1]
+        out.append(p)
+        cur = p[-1]
+    return out
+
+
+# ------------------------------------------------------------------ isolation (3.2)
+def not_isolated(copper, r: float):
+    """Where two separate copper areas are closer than 2r: the tool cannot pass
+    between them, so they would stay connected."""
+    islands = as_polygons(copper)
+    if len(islands) < 2:
+        return Polygon()
+    bufs = [i.buffer(r, quad_segs=8) for i in islands]
+    tree = shapely.STRtree(bufs)
+    a, b = tree.query(bufs, predicate="intersects")
+    spots = [bufs[i].intersection(bufs[j]) for i, j in zip(a, b) if i < j]
+    return unary_union([g for g in spots if not g.is_empty]) if spots else Polygon()
+
+
+
+def isolation(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.08,
+              passes: int = 1, overlap: float = 0.3, extra: float = 0.0,
+              climb: bool = True, safe_z: float = 2.0, clip_to_outline: bool = True) -> OpResult:
+    copper = board.copper.get(side)
+    res = OpResult(f"Isolation {side}", tool)
+    if copper is None or copper.is_empty:
+        res.notes.append(f"no {side} copper")
+        return res
+    depth = -abs(depth)
+    w = tool.cut_width(depth)
+    if w <= 0:
+        raise ValueError("tool cut width is 0 - check V-bit tip / depth")
+    res.notes.append(f"cut width {w:.3f} mm at depth {depth:.3f}")
+    r = w / 2 + extra
+    bad = not_isolated(copper, r)
+    if not bad.is_empty:
+        res.problem_area = bad
+        res.notes.append(f"⚠ {len(as_polygons(bad))} place(s) too narrow for this tool "
+                         f"(gap < {2 * r:.3f} mm) - copper may stay connected there")
+    region = board.outline.buffer(w) if clip_to_outline and board.outline is not None \
+        and not board.outline.is_empty else None
+    paths = []
+    for k in range(max(1, passes)):
+        off = w / 2 + extra + k * w * (1 - overlap)
+        shape = copper.buffer(off, quad_segs=RES).simplify(0.002)
+        for poly in as_polygons(shape):
+            rings = [(poly.exterior, True)] + [(i, False) for i in poly.interiors]
+            for ring, outer in rings:
+                pts = _orient(ring, outer, climb)
+                if region is not None:
+                    clipped = LineString(pts).intersection(region)
+                    if clipped.is_empty:
+                        continue
+                    if not (clipped.geom_type == "LineString" and
+                            clipped.coords[0] == clipped.coords[-1]):
+                        paths.extend(_lines(clipped))
+                        continue
+                paths.append(pts)
+    paths = [p for p in paths if len(p) > 1]
+    W = _W(safe_z)
+    for p in _order(paths):
+        W.rapid_xy(*p[0])
+        W.plunge(depth, tool.plunge)
+        W.cut(p[1:], tool.feed)
+    W.lift()
+    res.paths = paths
+    res.lines = W.out
+    return res
+
+
+# ------------------------------------------------------------------ copper clearing (3.4)
+def _fill_rings(region, d: float, overlap: float, limit=None):
+    """Contour-parallel rings filling `region` with a tool of diameter d."""
+    paths = []
+    k = 0
+    step = d * (1 - overlap)
+    while True:
+        shape = region.buffer(-(d / 2 + k * step), quad_segs=RES)
+        if shape.is_empty or k > 500:
+            break
+        for ring in _rings(shape.simplify(0.002)):
+            line = LineString(ring.coords)
+            if limit is not None:
+                line = line.intersection(limit)
+            paths.extend(p for p in _lines(line) if len(p) > 1)
+        k += 1
+    return paths
+
+
+def clearing(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.1,
+             overlap: float = 0.4, keep: float = 0.2, rest_tool: Tool | None = None,
+             margin: float = 0.5, safe_z: float = 2.0) -> list[OpResult]:
+    """Remove all copper except the tracks/pads (+keep mm around them).
+
+    With rest_tool (smaller), the big tool clears what it can and the small
+    tool only the corners the big one could not reach.
+    """
+    copper = board.copper.get(side)
+    if copper is None or copper.is_empty:
+        return []
+    depth = -abs(depth)
+    area = board.outline.buffer(-margin) if board.outline is not None else copper.envelope
+    region = area.difference(copper.buffer(keep, quad_segs=RES))
+    out = []
+    tools = [tool] + ([rest_tool] if rest_tool is not None else [])
+    reached = Polygon()
+    for n, t in enumerate(tools):
+        d = t.cut_width(depth)
+        if n == 0:
+            paths = _fill_rings(region, d, overlap)
+            reached = region.buffer(-d / 2, quad_segs=RES).buffer(d / 2, quad_segs=RES)
+        else:
+            rest = region.difference(reached.buffer(0.01))
+            rest = unary_union([p for p in as_polygons(rest) if p.area > (d * d) / 20])
+            if rest.is_empty:
+                continue
+            paths = _fill_rings(region, d, overlap, limit=rest.buffer(d))
+        r = OpResult(f"Clearing {side}" + (" (rest)" if n else ""), t)
+        W = _W(safe_z)
+        for p in _order(paths):
+            W.rapid_xy(*p[0])
+            W.plunge(depth, t.plunge)
+            W.cut(p[1:], t.feed)
+        W.lift()
+        r.lines, r.paths = W.out, paths
+        length = sum(LineString(p).length for p in paths)
+        r.notes.append(f"{len(paths)} passes, {length:.0f} mm of cutting "
+                       f"(≈{length / max(min(t.feed, 170), 1):.0f} min)")
+        out.append(r)
+    return out
+
+
+# ------------------------------------------------------------------ drilling (3.3)
+def assign_drills(holes: list[Hole], bits: list[float], tolerance: float = 0.15,
+                  mill_above: float | None = None):
+    """Map hole sizes to available bits. Returns ({bit: [holes]}, [holes to mill])."""
+    groups: dict[float, list[Hole]] = {}
+    mill: list[Hole] = []
+    bits = sorted(bits)
+    for h in holes:
+        if mill_above is not None and h.d > mill_above + 1e-6:
+            mill.append(h)
+            continue
+        best = min(bits, key=lambda b: (abs(b - h.d), -b)) if bits else h.d
+        if bits and abs(best - h.d) > tolerance:
+            if mill_above is not None and h.d > max(bits):
+                mill.append(h)
+                continue
+        groups.setdefault(best, []).append(h)
+    return dict(sorted(groups.items())), mill
+
+
+def drilling(holes: list[Hole], bit: Tool, depth: float = 1.8, peck: float | None = None,
+             safe_z: float = 2.0) -> OpResult:
+    res = OpResult(f"Drill {bit.diameter:g} mm ({len(holes)} holes)", bit)
+    depth = -abs(depth)
+    peck = abs(peck) if peck else None
+    W = _W(safe_z)
+    pts = _order([[(h.x, h.y)] for h in holes])
+    for p in pts:
+        x, y = p[0]
+        W.rapid_xy(x, y)
+        if peck:
+            z = 0.0
+            W.out.append("G0 Z0.200")
+            while z > depth + 1e-9:
+                z = max(depth, z - peck)
+                W.out.append(f"G1 Z{z:.4f} F{bit.plunge:g}")
+                W.out.append("G0 Z0.200")
+            W.z = 0.2
+        else:
+            W.plunge(depth, bit.plunge)
+        W.lift()
+        res.paths.append([(x, y)])
+    res.lines = W.out
+    return res
+
+
+def mill_holes(holes: list[Hole], tool: Tool, depth: float = 1.8, safe_z: float = 2.0) -> OpResult:
+    """Holes bigger than the tool: helix down on a circle, then a clean-up ring."""
+    res = OpResult(f"Mill holes ({len(holes)}) with Ø{tool.diameter:g}", tool)
+    depth = -abs(depth)
+    W = _W(safe_z)
+    for p in _order([[(h.x, h.y)] for h in holes]):
+        x, y = p[0]
+        h = next(hh for hh in holes if (hh.x, hh.y) == (x, y))
+        r = (h.d - tool.diameter) / 2
+        if r <= 0.01:
+            res.notes.append(f"hole Ø{h.d:g} at X{x:.2f} Y{y:.2f} not bigger than tool - drilled")
+            W.rapid_xy(x, y)
+            W.plunge(depth, tool.plunge)
+            W.lift()
+            continue
+        W.rapid_xy(x + r, y)
+        W.plunge(0.0, tool.plunge)
+        turns = max(1, math.ceil(abs(depth) / tool.stepdown))
+        n = 24
+        circle = [(x + r * math.cos(2 * math.pi * k / n), y + r * math.sin(2 * math.pi * k / n))
+                  for k in range(1, n + 1)]
+        for t in range(turns):
+            zs = [depth * (t + k / n) / turns for k in range(1, n + 1)]
+            W.cut(circle, tool.feed, zs)
+        W.cut(circle, tool.feed)
+        W.lift()
+        res.paths.append(circle)
+    res.lines = W.out
+    return res
+
+
+# ------------------------------------------------------------------ cutout (3.3)
+def cutout(board: PlacedBoard, tool: Tool, thickness: float = 1.6, extra_depth: float = 0.1,
+           tabs: int = 4, tab_width: float = 3.0, tab_height: float = 0.6,
+           safe_z: float = 2.0) -> OpResult:
+    res = OpResult("Board cutout", tool)
+    shape = board.outline
+    if shape is None or shape.is_empty:
+        res.notes.append("no board outline")
+        return res
+    d = tool.diameter
+    total = -(abs(thickness) + extra_depth)
+    passes = max(1, math.ceil(abs(total) / tool.stepdown))
+    contours = []
+    for poly in as_polygons(shape):
+        outer = Polygon(poly.exterior).buffer(d / 2, quad_segs=RES).exterior
+        contours.append((outer, True))
+        for hole in poly.interiors:
+            inner = Polygon(hole).buffer(-d / 2, quad_segs=RES)
+            for p in as_polygons(inner):
+                contours.append((p.exterior, False))
+    W = _W(safe_z)
+    tab_top = -(abs(thickness) - tab_height)
+    for ring, outer in contours:
+        pts = _orient(ring, outer, climb=False)
+        line = LineString(pts)
+        L = line.length
+        n_tabs = tabs if outer else 0
+        tab_ranges = [((k + 0.5) * L / n_tabs - (tab_width + d) / 2,
+                       (k + 0.5) * L / n_tabs + (tab_width + d) / 2) for k in range(n_tabs)]
+        # densify so tabs start/stop near the right place
+        dense = [line.interpolate(s).coords[0] for s in
+                 [i * 0.5 for i in range(int(L / 0.5) + 1)] + [L]]
+        W.rapid_xy(*dense[0])
+        for k in range(1, passes + 1):
+            z = total * k / passes
+            zs = []
+            dist = 0.0
+            prev = dense[0]
+            for q in dense:
+                dist += math.dist(prev, q)
+                prev = q
+                in_tab = any(a <= dist <= b for a, b in tab_ranges)
+                zs.append(max(z, tab_top) if in_tab else z)
+            W.plunge(zs[0], tool.plunge) if k == 1 else W.cut([dense[0]], tool.feed, [zs[0]])
+            W.cut(dense[1:], tool.feed, zs[1:])
+        W.lift()
+        res.paths.append(dense)
+    if tabs:
+        res.notes.append(f"{tabs} tabs, {tab_width:g} mm wide, {tab_height:g} mm high")
+    res.lines = W.out
+    return res
+
+
+# ------------------------------------------------------------------ double-sided (3.5)
+def pin_positions(board: PlacedBoard, offset: float = 5.0) -> list[tuple[float, float]]:
+    """Two alignment pins on the flip axis, `offset` mm outside the board."""
+    w, h = board.size
+    m = board.placement.margin
+    if board.placement.flip_axis == "x":     # flip left<->right about x = centre
+        cx = m + w / 2
+        return [(cx, m - offset), (cx, m + h + offset)]
+    cy = m + h / 2
+    return [(m - offset, cy), (m + w + offset, cy)]
+
+
+def pins(board: PlacedBoard, tool: Tool, diameter: float = 3.0, depth: float = 4.0,
+         offset: float = 5.0, safe_z: float = 2.0,
+         area: tuple[float, float] | None = None) -> OpResult:
+    holes = [Hole(x, y, diameter) for x, y in pin_positions(board, offset)]
+    if tool.kind == DRILL or abs(tool.diameter - diameter) < 0.05:
+        r = drilling(holes, tool, depth, peck=tool.stepdown, safe_z=safe_z)
+    else:
+        r = mill_holes(holes, tool, depth, safe_z)
+    r.name = f"Alignment pins Ø{diameter:g}, depth {depth:g}"
+    for x, y in pin_positions(board, offset):
+        if x < 0 or y < 0:
+            r.notes.append("⚠ a pin is below work 0 - increase the board offset to at least "
+                           f"{offset + diameter:.1f} mm, or the machine cannot reach it")
+            break
+        if area is not None and (x > area[0] or y > area[1]):
+            r.notes.append(f"⚠ a pin (X{x:.1f} Y{y:.1f}) is outside the machine area "
+                           f"{area[0]:g} × {area[1]:g} mm - use a smaller pin distance / offset "
+                           "or flip the other way")
+            break
+    r.notes.append("pins at " + ", ".join(f"X{x:.2f} Y{y:.2f}" for x, y in pin_positions(board, offset)))
+    return r
+
+
+# ------------------------------------------------------------------ job assembly
+def _safe(text: str) -> str:
+    """G-code comments cannot contain brackets."""
+    return text.replace("(", "[").replace(")", "]")
+
+
+def combine(ops: list[OpResult], title: str, safe_z: float = 2.0,
+            tool_change_z: float = 15.0) -> str:
+    """One G-code job; a tool-change pause (M6) when the tool changes."""
+    out = [f"(MicroPCB - {_safe(title)})", "G21 G90 G17", f"G0 Z{safe_z:.3f}"]
+    cur = None
+    for op in ops:
+        if op.empty:
+            continue
+        if cur is not None and op.tool.name != cur.name:
+            out += ["M5", f"G0 Z{tool_change_z:.3f}",
+                    f"M6 (Change tool to {_safe(op.tool.label)} - then Auto-level tab: "
+                    "Probe + set Z 0 - and Resume)"]
+            cur = None
+        if cur is None:
+            if len(out) == 3:
+                out.append(f"(First tool: {_safe(op.tool.label)} - zero Z on the copper)")
+            out.append("M3")
+            cur = op.tool
+        out.append(f"({_safe(op.name)})")
+        out.extend(op.lines)
+    out += ["M5", f"G0 Z{safe_z:.3f}", "M30"]
+    return "\n".join(out) + "\n"
