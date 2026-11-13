@@ -88,3 +88,40 @@ Changes to the surface settings take effect immediately, even while running.
 - MicroPCB itself does **not** need the bridge.
 - The bridge adds about 1 ms per reply. The original software waits for
   each reply anyway, so you will not notice it.
+
+## 6. Testing MicroPCB auto-level (2.4) through the bridge
+
+MicroPCB can also connect through the bridge. The bridge window then shows
+every packet and probe reply, which is handy while testing auto-level.
+
+```
+MicroPCB ⇄ COM20 ═(com0com)═ COM21 ⇄ MicroPCB Bridge ⇄ ┬ simulated machine (step A)
+                                                     └ real machine (step B)
+```
+
+### A. Simulated machine (no hardware)
+1. Start the bridge: `.venv\Scripts\python -m micropcb.bridge`
+   - Mode **Simulated machine**, virtual port **COM21**.
+   - Surface Z at start: **−3.000**; try Tilt X **0.5**, Centre bulge **0.1**.
+   - Tick **Show packets** to watch the traffic. Click **Start**.
+2. Start MicroPCB: `.venv\Scripts\python -m micropcb`
+   - Port **COM20** → **Connect** → **Zero all**.
+3. Open `examples\aircut-test.nc`, go to the **Auto-level** tab:
+   - **Probe here** → touch at about −3.000 mm. Jog Z up 1 mm, **Probe here**
+     again → same value. In the bridge: *Probe touches* +1 each time.
+   - **Use job size** → **Start auto-level**. Points appear in 2D/3D;
+     the range should match the tilt / bulge you set.
+   - **Apply height map to the job** → **Run** (bridge simulator executes it).
+4. Change the tilt/bulge in the bridge and measure again: the map follows.
+
+Measured end-to-end on 2026-11-13 (real com0com ports, real-time timing):
+heights matched the simulated board exactly; about 8 s per point.
+
+### B. Real machine
+Same as A, but the bridge in **Bridge to real machine** mode with the
+machine port (HW-597B). Clip on the copper, spindle OFF, tool 1–3 mm above
+the board. Then the hardware test in `docs/stage2-design.md` §2.4.
+The bridge log + MicroPCB console (Show raw traffic) record everything —
+send them if a probe check fails.
+(MicroPCB does not need the bridge on the real machine; it is only for
+watching the traffic.)

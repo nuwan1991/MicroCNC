@@ -238,7 +238,8 @@ class BridgeWindow(QMainWindow):
             QMessageBox.warning(self, "Bridge", f"Cannot open {front_port}:\n{e}")
             return
         if self.rb_sim.isChecked():
-            self.sim = SimMachine(realtime=True, surface=self._surface)
+            # machine Z counter with its own origin, like a real machine after power-on
+            self.sim = SimMachine(realtime=True, surface=self._surface, fw_z_offset=-7000)
             for b, a in ((self.rel_btn, "released"), (self.ovl_btn, "overload"),
                          (self.pwr_btn, "silent")):
                 setattr(self.sim, a, b.isChecked())
