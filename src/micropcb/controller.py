@@ -12,13 +12,18 @@ from __future__ import annotations
 
 from typing import Callable
 
+from .gcode import Program, parse
+from .job import Job
 from .jog import jog_ticks, pack
+from .planner import Planner
 from .serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_IDLE, EV_LOST,
-                          EV_PROBE, EV_RELEASED, SerialLink, find_machine)
+                          EV_OVERLOAD, EV_PROBE, EV_RELEASED, SerialLink,
+                          find_machine)
 from .settings import MachineState, Settings
 
 AXES = "xyz"
 EV_STATE = "state"  # controller-level: something about position validity changed
+EV_JOB = "job"      # payload: Job (state changed)
 
 
 class MachineController:
@@ -32,6 +37,7 @@ class MachineController:
         self.link = self._new_link()
         self.port: str | None = None
         self.was_unclean = not self.state.clean_exit
+        self.job: Job | None = None
 
     # ------------------------------------------------------------ helpers
     def _new_link(self) -> SerialLink:
@@ -47,6 +53,11 @@ class MachineController:
         if ev in (EV_RELEASED, EV_PROBE, EV_LOST) and (ev != EV_RELEASED or payload):
             # step counting can no longer be trusted
             self.state.home_set = False
+            self._fail_job({EV_RELEASED: "Motors released - job stopped",
+                            EV_PROBE: "Probe touch - job stopped",
+                            EV_LOST: "Connection lost - job stopped"}[ev])
+        if ev == EV_OVERLOAD:
+            self._fail_job("Spindle overload - job stopped")
         if ev in (EV_IDLE, EV_DISCONNECTED, EV_LOST):
             self.save_state()
         self._emit(ev, payload)
@@ -95,6 +106,9 @@ class MachineController:
         return self.port
 
     def disconnect(self) -> None:
+        if self.job_active:
+            self.job.stop("Disconnected")  # type: ignore[union-attr]
+            self.job.join(2)  # type: ignore[union-attr]
         if self.connected:
             self.link.close()
         self.state.clean_exit = self.link.position_valid
@@ -156,11 +170,13 @@ class MachineController:
         return max(lo, min(hi, cur + delta)) - cur
 
     # ------------------------------------------------------------ motion
-    def _require_ready(self) -> None:
+    def _require_ready(self, allow_job: bool = False) -> None:
         if not self.connected:
             raise RuntimeError("not connected")
         if self.link.released:
             raise RuntimeError("motors released - press the release button again")
+        if not allow_job and self.job_active:
+            raise RuntimeError("a job is running - stop it first")
 
     def jog(self, axis: str, mm: float, steps_per_tick: int | None = None) -> float:
         """Relative jog; returns the distance actually commanded (after limits)."""
@@ -200,10 +216,14 @@ class MachineController:
 
     def stop(self) -> None:
         """Soft stop: drop queued motion (machine halts within ~60 ms)."""
+        if self.job_active:
+            self.job.stop()  # type: ignore[union-attr]
         self.link.stop()
 
     def emergency_stop(self) -> None:
         """Stop everything and turn the spindle off."""
+        if self.job_active:
+            self.job.stop("E-STOP")  # type: ignore[union-attr]
         if self.connected:
             self.link.stop()
             if not self.link.released:
@@ -216,4 +236,78 @@ class MachineController:
         return self.link.wait_idle(timeout)
 
 
-__all__ = ["MachineController", "EV_STATE", "EV_CONNECTED"]
+    # ------------------------------------------------------------ jobs
+    @property
+    def job_active(self) -> bool:
+        return self.job is not None and self.job.active
+
+    def _fail_job(self, reason: str) -> None:
+        if self.job_active:
+            self.job.fail(reason)  # type: ignore[union-attr]
+
+    def _on_job(self, job: Job) -> None:
+        if not job.active:
+            self.save_state()
+        self._emit(EV_JOB, job)
+
+    def program_for_run(self, text: str) -> Program:
+        """Parse with the current work position as the start point."""
+        return parse(text, self.work_mm() if self.connected else (0.0, 0.0, 0.0))
+
+    def check_program(self, prog: Program) -> list[str]:
+        """Problems that block running (empty list = OK)."""
+        problems = []
+        b = prog.bounds()
+        if b is None and not prog.moves:
+            problems.append("The file has no moves.")
+        if b is not None and self.limits_active():
+            off = self.state.work_offset
+            for i, a in enumerate("XYZ"):
+                lo, hi = self.limit_range(i)
+                mn = b[0][i] / self.mmps(i) + off[i]
+                mx = b[1][i] / self.mmps(i) + off[i]
+                if mn < lo - 0.5 or mx > hi + 0.5:
+                    problems.append(
+                        f"{a} goes outside the work area ({lo * self.mmps(i):.1f} … "
+                        f"{hi * self.mmps(i):.1f} mm machine; job needs "
+                        f"{mn * self.mmps(i):.2f} … {mx * self.mmps(i):.2f}).")
+        return problems
+
+    def make_planner(self, prog: Program) -> Planner:
+        return Planner(prog, self.settings.mm_per_step, self.link.position,
+                       self.state.work_offset, self.settings.max_steps_per_tick)
+
+    def start_job(self, text: str, name: str = "job") -> Job:
+        """Parse, check and start a G-code job from the current position."""
+        self._require_ready()
+        if self.busy():
+            raise RuntimeError("machine is moving - wait until it is idle")
+        if not self.position_valid:
+            raise RuntimeError("position is not reliable - set work zero first")
+        prog = self.program_for_run(text)
+        problems = self.check_program(prog)
+        if problems:
+            raise RuntimeError(" ".join(problems))
+        planner = self.make_planner(prog)
+        total = planner.estimate_ticks()
+        self.job = Job(name, prog, planner, self.link, self._on_job)
+        self.job.total_ticks = total
+        self.job.start()
+        self._emit(EV_JOB, self.job)
+        return self.job
+
+    def pause_job(self) -> None:
+        if self.job_active:
+            self.job.pause()  # type: ignore[union-attr]
+
+    def resume_job(self) -> None:
+        if self.job_active:
+            self._require_ready(allow_job=True)
+            self.job.resume()  # type: ignore[union-attr]
+
+    def stop_job(self) -> None:
+        if self.job_active:
+            self.job.stop()  # type: ignore[union-attr]
+
+
+__all__ = ["MachineController", "EV_STATE", "EV_CONNECTED", "EV_JOB"]

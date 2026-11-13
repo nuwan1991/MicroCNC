@@ -178,6 +178,10 @@ class SerialLink:
     def wait_idle(self, timeout: float | None = None) -> bool:
         return self._idle.wait(timeout)
 
+    def queue_size(self) -> int:
+        """Packets waiting to be sent (not counting the one in flight)."""
+        return self._q.qsize()
+
     @property
     def position(self) -> tuple[int, int, int]:
         with self._lock:

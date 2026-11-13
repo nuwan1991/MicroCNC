@@ -1,7 +1,8 @@
 # MicroPCB
 
 Control software for Wegstr CNC machines, focused on PCB milling.
-Status: **milestone 1.1** — protocol, serial link, simulator, command-line jog tool.
+Status: **milestone 1.3** — G-code jobs (run / pause / stop) with 2D preview, on top of
+the GUI (1.2) and the protocol / serial link / simulator (1.1).
 
 Docs: [protocol](docs/protocol.md) · [Stage 1 design](docs/stage1-design.md) ·
 [capture guide](docs/capture-guide.md)
@@ -13,7 +14,7 @@ python -m venv .venv
 ```
 
 ## Run
-GUI (milestone 1.2):
+GUI:
 ```
 .venv\Scripts\python -m micropcb
 ```
@@ -44,3 +45,10 @@ Close the original Wegstr software first (only one program can use the port).
 | `src/micropcb/sim_machine.py` | simulated machine for offline use / tests |
 | `src/micropcb/jog.py` | jog moves with accel ramp |
 | `src/micropcb/cli.py` | interactive jog tool |
+| `src/micropcb/gcode.py` | G-code parser (arcs split into lines) |
+| `src/micropcb/planner.py` | speed planning, corners, accel ramp -> step ticks |
+| `src/micropcb/job.py` | job thread: streaming, pause / resume / stop |
+| `src/micropcb/controller.py` | position, zero, soft limits, jog, jobs |
+| `src/micropcb/ui/` | main window, 2D preview, settings |
+| `src/micropcb/bridge/` | bridge for the original Wegstr software |
+| `examples/aircut-test.nc` | air-cut test job for milestone 1.3 |

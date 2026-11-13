@@ -200,3 +200,23 @@ a tooltip explaining the bed moves the opposite way.
    button = reply `03` (handled in §9).
 6. Can a job be **resumed** after a release (user re-aligns by hand), or
    always restart? (Proposal: Stage 1 = restart only.)
+
+## 13. Milestone 1.3 notes (2026-11-13)
+Built: `gcode.py`, `planner.py`, `job.py`, job panel + 2D preview in the GUI.
+- Planner: per-line top speed from F and the 14 steps/tick limit; corner
+  speed by junction deviation (0.02 mm); trapezoid ramp 3 → 14 steps/tick at
+  1.5 steps/tick per tick (like the original jog ramp); ticks rounded to
+  whole steps absolutely, so no drift.
+- M3 adds a 1 s spin-up wait. Spindle is switched off at the end and on stop.
+- G4 P is in **seconds**.
+- Pause ramps down and stops on the path; Resume ramps up from there.
+  Jogging is blocked while a job is active or paused (no tool change with
+  re-zero mid-job yet: split the file per tool).
+- Job start checks: connected, idle, position valid, file bounds inside the
+  work area (when machine home is set).
+- Release button / overload / connection lost / probe touch → job stops
+  (restart only, decision 5).
+
+**Hardware test (you):** `examples/aircut-test.nc`, tool ~10 mm above the
+bed. Check: shape and size, smooth corners, Pause/Resume, Stop, M0 pause,
+spindle on/off, time vs estimate.

@@ -25,6 +25,7 @@ class Settings:
     soft_limits: bool = True
     auto_reconnect: bool = True
     last_port: str = ""
+    last_dir: str = ""
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

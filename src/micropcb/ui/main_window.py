@@ -1,23 +1,28 @@
-"""MicroPCB main window (milestone 1.2): connect, DRO, jog, zero, spindle, E-stop."""
+"""MicroPCB main window: connect, DRO, jog, zero, spindle, E-stop (1.2),
+G-code job with 2D preview, run / pause / stop (1.3)."""
 from __future__ import annotations
 
+import os
 import time
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QKeySequence
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
                                QSlider, QVBoxLayout, QWidget, QAbstractSpinBox,
-                               QLineEdit)
+                               QLineEdit, QFileDialog, QProgressBar, QSplitter)
 
 from .. import __version__
-from ..controller import AXES, EV_STATE, MachineController
+from ..controller import AXES, EV_JOB, EV_STATE, MachineController
+from ..gcode import GCodeError, Program, parse
+from ..job import DONE, FAILED, PAUSED_STATE, PAUSING, RUNNING, STOPPED, STOPPING
 from ..protocol import TICK_SECONDS
 from ..serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_LOST, EV_OVERLOAD,
                            EV_PROBE, EV_RELEASED, EV_TRAFFIC, list_ports, probe_port)
 from ..settings import MachineState, Settings
 from ..sim_machine import SimMachine
+from .preview import PreviewWidget
 from .settings_dialog import SettingsDialog
 
 SIM_LABEL = "Simulator (no machine)"
@@ -49,6 +54,10 @@ class MainWindow(QMainWindow):
         self._held_key: int | None = None
         self._lost_port: str | None = None
         self._overload = False
+        self.job_text: str | None = None
+        self.job_path: str | None = None
+        self.job_prog: Program | None = None
+        self._job_secs = 0.0
 
         self._build_ui()
         self._build_menu()
@@ -241,15 +250,66 @@ class MainWindow(QMainWindow):
         crow.addStretch(1)
         crow.addWidget(clear)
         cl.addLayout(crow)
-        body.addWidget(con, 1)
+        right = QSplitter(Qt.Vertical)
+        self.preview = PreviewWidget()
+        right.addWidget(self.preview)
+        right.addWidget(self._build_job_panel())
+        right.addWidget(con)
+        right.setStretchFactor(0, 5)
+        right.setStretchFactor(1, 0)
+        right.setStretchFactor(2, 2)
+        body.addWidget(right, 1)
 
         self.home_lbl = QLabel()
         self.statusBar().addPermanentWidget(self.home_lbl)
         self.jog_widgets = [jog, self.zero_all_btn, self.goto_zero_btn, spg]
-        self.resize(1100, 720)
+        self.resize(1280, 860)
+
+    def _build_job_panel(self) -> QWidget:
+        box = QGroupBox("Job")
+        v = QVBoxLayout(box)
+        row = QHBoxLayout()
+        self.open_btn = QPushButton("Open…")
+        self.open_btn.clicked.connect(self.open_job)
+        self.run_btn = QPushButton("▶ Run")
+        self.run_btn.clicked.connect(self.run_job)
+        self.pause_btn = QPushButton("⏸ Pause")
+        self.pause_btn.clicked.connect(self.pause_resume_job)
+        self.stopjob_btn = QPushButton("■ Stop")
+        self.stopjob_btn.clicked.connect(lambda: self._do(self.ctl.stop_job))
+        for b in (self.open_btn, self.run_btn, self.pause_btn, self.stopjob_btn):
+            b.setMinimumHeight(36)
+            b.setFocusPolicy(Qt.NoFocus)
+            row.addWidget(b)
+        self.run_btn.setStyleSheet("font-weight:bold;")
+        row.addStretch(1)
+        v.addLayout(row)
+        self.job_info = QLabel("No file loaded")
+        self.job_info.setWordWrap(True)
+        v.addWidget(self.job_info)
+        prow = QHBoxLayout()
+        self.job_bar = QProgressBar()
+        self.job_bar.setRange(0, 1000)
+        self.job_bar.setTextVisible(False)
+        self.job_status = QLabel()
+        self.job_status.setMinimumWidth(330)
+        prow.addWidget(self.job_bar, 1)
+        prow.addWidget(self.job_status)
+        v.addLayout(prow)
+        return box
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("&File")
+        a = QAction("&Open G-code…", self)
+        a.setShortcut(QKeySequence.Open)
+        a.triggered.connect(self.open_job)
+        m.addAction(a)
+        a = QAction("&Reload file", self)
+        a.setShortcut("F5")
+        a.triggered.connect(lambda: self.load_job(self.job_path)
+                            if self.job_path and not self.ctl.job_active else None)
+        m.addAction(a)
+        m.addSeparator()
         a = QAction("&Settings…", self)
         a.triggered.connect(self.open_settings)
         m.addAction(a)
@@ -362,6 +422,145 @@ class MainWindow(QMainWindow):
             self._speed_changed(self.speed.value())
             self.log("Settings saved")
 
+    # ================================================================ job
+    def open_job(self) -> None:
+        if self.ctl.job_active:
+            return
+        start = os.path.dirname(self.job_path) if self.job_path else self.settings.last_dir
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open G-code", start or "",
+            "G-code (*.nc *.gcode *.ngc *.tap *.cnc *.gc *.txt);;All files (*)")
+        if path:
+            self.load_job(path)
+
+    def load_job(self, path: str) -> None:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            prog = parse(text, self._job_start())
+        except (OSError, GCodeError) as e:
+            QMessageBox.warning(self, "Open G-code", f"Cannot load the file:\n{e}")
+            return
+        self.job_text, self.job_path, self.job_prog = text, path, prog
+        self.settings.last_dir = os.path.dirname(path)
+        self.preview.set_program(prog)
+        try:
+            self._job_secs = self.ctl.make_planner(prog).estimate_seconds()
+        except Exception:
+            self._job_secs = 0.0
+        self._show_job_info()
+        self.log(f"Loaded {os.path.basename(path)}: {len(prog.lines())} moves, "
+                 f"est. {_hms(self._job_secs)}")
+        for w in prog.warnings:
+            self.log(f"  note: {w}")
+        self._refresh()
+
+    def _job_start(self) -> tuple[float, float, float]:
+        return self.ctl.work_mm() if self.ctl.connected else (0.0, 0.0, 0.0)
+
+    def _show_job_info(self) -> None:
+        prog = self.job_prog
+        if prog is None:
+            self.job_info.setText("No file loaded")
+            return
+        parts = [f"<b>{os.path.basename(self.job_path or '')}</b> — "
+                 f"{prog.line_count} lines, est. time {_hms(self._job_secs)}"]
+        b = prog.bounds()
+        if b:
+            parts.append(f"X {b[0][0]:.2f}…{b[1][0]:.2f}  Y {b[0][1]:.2f}…{b[1][1]:.2f}  "
+                         f"Z {b[0][2]:.2f}…{b[1][2]:.2f} mm")
+        maxf = self.ctl.make_planner(prog).max_feed_mm_min
+        if prog.max_feed > maxf + 0.5:
+            parts.append(f"<span style='color:#e65100'>Feed F{prog.max_feed:g} is above the "
+                         f"machine maximum ({maxf:.0f} mm/min) - it will run slower.</span>")
+        if prog.warnings:
+            parts.append(f"<span style='color:#e65100'>{len(prog.warnings)} note(s) in console"
+                         "</span>")
+        self.job_info.setText("<br>".join(parts))
+
+    def run_job(self) -> None:
+        if self.job_text is None or self.ctl.job_active:
+            return
+        try:
+            prog = self.ctl.program_for_run(self.job_text)
+        except GCodeError as e:
+            QMessageBox.warning(self, "Run", str(e))
+            return
+        problems = self.ctl.check_program(prog)
+        if problems:
+            QMessageBox.warning(self, "Run", "Cannot run this job:\n\n" + "\n".join(problems))
+            return
+        wp = self.ctl.work_mm()
+        msg = (f"Run {os.path.basename(self.job_path or 'job')}?\n\n"
+               f"Tool is at work X {wp[0]:.3f}  Y {wp[1]:.3f}  Z {wp[2]:.3f}.\n"
+               f"Estimated time: {_hms(self._job_secs)}.\n")
+        if not self.ctl.limits_active():
+            msg += "\nSoft limits are OFF (machine home not set) - bounds are not checked."
+        if prog.uses_spindle:
+            msg += "\nThe spindle will switch on. Keep hands clear."
+        if QMessageBox.question(self, "Run job", msg) != QMessageBox.Yes:
+            return
+        try:
+            self.ctl.start_job(self.job_text, os.path.basename(self.job_path or "job"))
+        except (RuntimeError, GCodeError) as e:
+            QMessageBox.warning(self, "Run", str(e))
+            return
+        self.job_prog = prog
+        self.preview.set_program(prog)
+        self.log(f"Job started: {self.ctl.job.name}")
+
+    def pause_resume_job(self) -> None:
+        job = self.ctl.job
+        if job is None or not job.active:
+            return
+        if job.state == PAUSED_STATE:
+            self._do(self.ctl.resume_job)
+        else:
+            self.ctl.pause_job()
+
+    def _on_job_event(self, job) -> None:
+        if job.state == PAUSED_STATE:
+            self.log(f"Job paused at line {job.line}: {job.message}")
+            if job.message and job.message != "Paused":
+                QMessageBox.information(self, "Job paused",
+                                        f"{job.message}\n\nPress Resume to continue.")
+        elif job.state == DONE:
+            self.log(f"Job finished in {_hms(job.elapsed())}")
+            self.preview.set_progress_line(10 ** 9)
+        elif job.state in (STOPPED, FAILED):
+            self.log(f"Job stopped at line {job.line}: {job.message}")
+            if job.state == FAILED:
+                QMessageBox.warning(self, "Job stopped", job.message)
+        elif job.state == RUNNING and job.ticks_sent:
+            self.log("Job resumed")
+
+    def _refresh_job(self) -> None:
+        job = self.ctl.job
+        active = self.ctl.job_active
+        con = self.ctl.connected
+        rel = con and self.ctl.link.released
+        self.open_btn.setEnabled(not active)
+        self.run_btn.setEnabled(bool(self.job_text) and con and not rel and not active
+                                and self.ctl.position_valid)
+        self.pause_btn.setEnabled(active and job.state in (RUNNING, PAUSED_STATE))
+        self.pause_btn.setText("▶ Resume" if active and job.state == PAUSED_STATE else "⏸ Pause")
+        self.stopjob_btn.setEnabled(active)
+        if job is None:
+            self.job_bar.setValue(0)
+            self.job_status.setText("")
+            return
+        frac = job.progress()
+        self.job_bar.setValue(int(frac * 1000))
+        el = job.elapsed()
+        left = max(job.total_ticks - job.ticks_sent, 0) * TICK_SECONDS
+        names = {RUNNING: "Running", PAUSING: "Pausing…", PAUSED_STATE: "Paused",
+                 STOPPING: "Stopping…", DONE: "Done", STOPPED: "Stopped", FAILED: "Failed"}
+        self.job_status.setText(
+            f"{names.get(job.state, job.state)} · line {job.line}/{job.program.line_count} · "
+            f"{frac * 100:.0f}% · {_hms(el)} / left {_hms(left)}")
+        if active:
+            self.preview.set_progress_line(job.line)
+
     # ================================================================ events
     def _on_event(self, ev: str, payload: object) -> None:
         if ev == EV_TRAFFIC:
@@ -395,6 +594,8 @@ class MainWindow(QMainWindow):
             self._overload = False
         elif ev == EV_PROBE:
             self.log(f"Probe touch (machine value {payload})")
+        elif ev == EV_JOB:
+            self._on_job_event(payload)
         self._refresh()
 
     def _try_reconnect(self) -> None:
@@ -420,6 +621,9 @@ class MainWindow(QMainWindow):
             st, col = ("Reconnecting…", "#e65100") if self._lost_port else ("Disconnected", "#757575")
         elif rel:
             st, col = "Motors released", "#e65100"
+        elif c.job_active:
+            st, col = (("Job paused", "#e65100") if c.job.state == PAUSED_STATE
+                       else ("Running job", "#1565c0"))
         elif c.busy():
             st, col = "Moving", "#1565c0"
         else:
@@ -441,7 +645,7 @@ class MainWindow(QMainWindow):
         self.banner.setVisible(bool(msgs))
 
         for w in self.jog_widgets:
-            w.setEnabled(con and not rel)
+            w.setEnabled(con and not rel and not c.job_active)
 
         wp, mp = c.work_mm(), c.machine_mm()
         color = "" if valid else "color:#9e9e9e;"
@@ -454,6 +658,14 @@ class MainWindow(QMainWindow):
         self.spindle_btn.setChecked(sp)
         self.spindle_btn.setText("Spindle ON" if sp else "Spindle OFF")
         self.spindle_btn.setStyleSheet("background:#fdd835; font-weight:bold;" if sp else "")
+        self.preview.set_tool(wp[0], wp[1])
+        if c.state.home_set:
+            off = [c.state.work_offset[i] * c.mmps(i) for i in range(2)]
+            area = c.settings.work_area_mm
+            self.preview.set_area(QRectF(-off[0], -off[1], area[0], area[1]))
+        else:
+            self.preview.set_area(None)
+        self._refresh_job()
         self.home_lbl.setText("Soft limits: ON" if c.limits_active()
                               else "Soft limits: off (home not set)")
 
@@ -468,7 +680,7 @@ class MainWindow(QMainWindow):
         if key == Qt.Key_Escape and t == QEvent.KeyPress:
             self.emergency_stop()
             return True
-        if key not in JOG_KEYS or not self.kb_jog.isChecked():
+        if key not in JOG_KEYS or not self.kb_jog.isChecked() or self.ctl.job_active:
             return False
         if isinstance(QApplication.focusWidget(), (QLineEdit, QAbstractSpinBox)):
             return False
@@ -484,15 +696,26 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, e) -> None:  # noqa: N802
-        if self.ctl.connected and self.ctl.busy():
-            r = QMessageBox.question(self, "Exit", "The machine is moving. Stop and exit?")
+        if self.ctl.connected and (self.ctl.busy() or self.ctl.job_active):
+            r = QMessageBox.question(self, "Exit", "The machine is moving / a job is active. "
+                                     "Stop and exit?")
             if r != QMessageBox.Yes:
                 e.ignore()
                 return
         self.reconnect_timer.stop()
+        if self.ctl.job_active:
+            self.ctl.stop_job()
+            self.ctl.job.join(2)
         if self.ctl.connected and self.ctl.link.spindle:
             self.ctl.emergency_stop()
             self.ctl.wait_idle(1)
         self.ctl.disconnect()
         self.settings.save()
         e.accept()
+
+
+def _hms(secs: float) -> str:
+    secs = int(round(secs))
+    h, rem = divmod(secs, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
