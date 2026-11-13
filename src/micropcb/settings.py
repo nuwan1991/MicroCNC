@@ -26,6 +26,8 @@ class Settings:
     auto_reconnect: bool = True
     last_port: str = ""
     last_dir: str = ""
+    view_quality: str = "full"      # full | light | 2d
+    check_max_depth_mm: float = 2.0
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

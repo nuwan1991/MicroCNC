@@ -1,17 +1,19 @@
 """MicroPCB main window: connect, DRO, jog, zero, spindle, E-stop (1.2),
-G-code job with 2D preview, run / pause / stop (1.3)."""
+G-code job with 2D preview, run / pause / stop (1.3),
+3D view, G-code viewer, job checks, playback, live job view (2.1-2.3)."""
 from __future__ import annotations
 
 import os
 import time
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QFont, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
                                QSlider, QVBoxLayout, QWidget, QAbstractSpinBox,
-                               QLineEdit, QFileDialog, QProgressBar, QSplitter)
+                               QLineEdit, QFileDialog, QProgressBar, QSplitter,
+                               QTabWidget, QListWidget, QListWidgetItem, QScrollArea)
 
 from .. import __version__
 from ..controller import AXES, EV_JOB, EV_STATE, MachineController
@@ -22,6 +24,10 @@ from ..serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_LOST, EV_OVERLOAD,
                            EV_PROBE, EV_RELEASED, EV_TRAFFIC, list_ports, probe_port)
 from ..settings import MachineState, Settings
 from ..sim_machine import SimMachine
+from ..toolpath import ERROR, Timeline, Toolpath, check_program
+from ..autolevel import apply_heightmap
+from .autolevel_panel import AutoLevelPanel
+from .gcode_view import GCodeView
 from .preview import PreviewWidget
 from .settings_dialog import SettingsDialog
 
@@ -58,6 +64,16 @@ class MainWindow(QMainWindow):
         self.job_path: str | None = None
         self.job_prog: Program | None = None
         self._job_secs = 0.0
+        self.job_prog_raw: Program | None = None
+        self.tp: Toolpath | None = None
+        self.timeline: Timeline | None = None
+        self.issues = []
+        self.view3d = None
+        self.play_idx = 0
+        self.playing = False
+        self._play_t = 0.0
+        self._marker = None
+        self._sel_line = 0
 
         self._build_ui()
         self._build_menu()
@@ -233,7 +249,7 @@ class MainWindow(QMainWindow):
         left.addStretch(1)
 
         # --- Console
-        con = QGroupBox("Console")
+        con = QWidget()
         cl = QVBoxLayout(con)
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
@@ -251,14 +267,34 @@ class MainWindow(QMainWindow):
         crow.addWidget(clear)
         cl.addLayout(crow)
         right = QSplitter(Qt.Vertical)
+        self.view_tabs = QTabWidget()
         self.preview = PreviewWidget()
-        right.addWidget(self.preview)
+        self.preview.lineClicked.connect(self.select_line)
+        self.view_tabs.addTab(self.preview, "2D")
+        self.view_tabs.currentChanged.connect(lambda _: self._sync_views())
+        right.addWidget(self.view_tabs)
         right.addWidget(self._build_job_panel())
-        right.addWidget(con)
+        self.bottom_tabs = QTabWidget()
+        self.bottom_tabs.addTab(con, "Console")
+        self.gcode_view = GCodeView()
+        self.gcode_view.lineClicked.connect(lambda ln: self.select_line(ln, from_text=True))
+        self.bottom_tabs.addTab(self.gcode_view, "G-code")
+        self.checks_list = QListWidget()
+        self.checks_list.itemClicked.connect(
+            lambda it: self.select_line(it.data(Qt.UserRole)))
+        self.bottom_tabs.addTab(self.checks_list, "Checks")
+        self.al = AutoLevelPanel(self)
+        al_scroll = QScrollArea()
+        al_scroll.setWidget(self.al)
+        al_scroll.setWidgetResizable(True)
+        al_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.bottom_tabs.addTab(al_scroll, "Auto-level")
+        right.addWidget(self.bottom_tabs)
         right.setStretchFactor(0, 5)
         right.setStretchFactor(1, 0)
         right.setStretchFactor(2, 2)
         body.addWidget(right, 1)
+        self._apply_quality()
 
         self.home_lbl = QLabel()
         self.statusBar().addPermanentWidget(self.home_lbl)
@@ -296,6 +332,39 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.job_bar, 1)
         prow.addWidget(self.job_status)
         v.addLayout(prow)
+
+        # playback (simulation of the job in the views, no machine motion)
+        pb = QHBoxLayout()
+        self.play_btn = QPushButton("▶ Simulate")
+        self.play_btn.setFocusPolicy(Qt.NoFocus)
+        self.play_btn.setToolTip("Play the job in the views only - the machine does not move")
+        self.play_btn.clicked.connect(self.toggle_playback)
+        self.play_speed = QComboBox()
+        self.play_speed.setFocusPolicy(Qt.NoFocus)
+        for k in (1, 5, 20, 100, 500):
+            self.play_speed.addItem(f"{k}×", k)
+        self.play_speed.setCurrentIndex(2)
+        self.play_slider = QSlider(Qt.Horizontal)
+        self.play_slider.setFocusPolicy(Qt.NoFocus)
+        self.play_slider.setRange(0, 0)
+        self.play_slider.valueChanged.connect(self._slider_moved)
+        self.to_sel_btn = QPushButton("⇥ Selected line")
+        self.to_sel_btn.setFocusPolicy(Qt.NoFocus)
+        self.to_sel_btn.setToolTip("Move the simulation to the selected G-code line")
+        self.to_sel_btn.clicked.connect(self._play_to_selected)
+        self.reset_play_btn = QPushButton("⟲")
+        self.reset_play_btn.setFocusPolicy(Qt.NoFocus)
+        self.reset_play_btn.setToolTip("Reset simulation")
+        self.reset_play_btn.clicked.connect(lambda: self._set_play_idx(0, stop=True))
+        self.play_lbl = QLabel()
+        self.play_lbl.setMinimumWidth(150)
+        for w in (self.play_btn, self.play_speed):
+            pb.addWidget(w)
+        pb.addWidget(self.play_slider, 1)
+        for w in (self.play_lbl, self.to_sel_btn, self.reset_play_btn):
+            pb.addWidget(w)
+        v.addLayout(pb)
+        self.play_timer = QTimer(self, interval=30, timeout=self._play_step)
         return box
 
     def _build_menu(self) -> None:
@@ -318,6 +387,17 @@ class MainWindow(QMainWindow):
         a.setShortcut(QKeySequence.Quit)
         a.triggered.connect(self.close)
         m.addAction(a)
+
+        m = self.menuBar().addMenu("&View")
+        grp = QActionGroup(self)
+        for key, text in (("full", "3D quality: &Standard"),
+                          ("light", "3D quality: &Light (built-in graphics / big files)"),
+                          ("2d", "&2D only (no 3D view)")):
+            a = QAction(text, self, checkable=True)
+            a.setChecked(self.settings.view_quality == key)
+            a.triggered.connect(lambda _=False, k=key: self.set_quality(k))
+            grp.addAction(a)
+            m.addAction(a)
 
         m = self.menuBar().addMenu("&Machine")
         a = QAction("Set machine &home here…", self)
@@ -373,7 +453,8 @@ class MainWindow(QMainWindow):
         port = self.port_box.currentData()
         try:
             if port == "SIM":
-                self.ctl.connect(transport=SimMachine())
+                self.ctl.connect(transport=SimMachine(surface=demo_board_surface,
+                                                      fw_z_offset=-20000))
             else:
                 self.ctl.connect(port)
             self.settings.save()
@@ -384,6 +465,8 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def emergency_stop(self) -> None:
+        if hasattr(self, "al") and self.al.running:
+            self.al.stop()
         self.ctl.emergency_stop()
         self.log("E-STOP: motion stopped, spindle off")
 
@@ -437,26 +520,95 @@ class MainWindow(QMainWindow):
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
-            prog = parse(text, self._job_start())
-        except (OSError, GCodeError) as e:
+            raw = parse(text, self._job_start())
+            prog = self._transformed(raw)
+        except (OSError, GCodeError, ValueError) as e:
             QMessageBox.warning(self, "Open G-code", f"Cannot load the file:\n{e}")
             return
-        self.job_text, self.job_path, self.job_prog = text, path, prog
+        self.job_text, self.job_path, self.job_prog_raw = text, path, raw
         self.settings.last_dir = os.path.dirname(path)
-        self.preview.set_program(prog)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            self._job_secs = self.ctl.make_planner(prog).estimate_seconds()
-        except Exception:
-            self._job_secs = 0.0
-        self._show_job_info()
+            self.gcode_view.set_text(text)
+            self._set_program(prog)
+        finally:
+            QApplication.restoreOverrideCursor()
         self.log(f"Loaded {os.path.basename(path)}: {len(prog.lines())} moves, "
                  f"est. {_hms(self._job_secs)}")
         for w in prog.warnings:
             self.log(f"  note: {w}")
+        n_err = sum(1 for i in self.issues if i.severity == ERROR)
+        if self.issues:
+            self.log(f"  checks: {n_err} problem(s), {len(self.issues) - n_err} warning(s) "
+                     "- see the Checks tab")
+            self.bottom_tabs.setCurrentWidget(self.checks_list)
         self._refresh()
+
+    def _set_program(self, prog: Program) -> None:
+        """Toolpath, timeline, checks and views for a parsed program."""
+        self.job_prog = prog
+        self.tp = Toolpath(prog)
+        try:
+            self.timeline = Timeline.build(self.ctl.make_planner(prog))
+            self._job_secs = self.timeline.seconds
+        except Exception as e:
+            self.timeline = None
+            self._job_secs = 0.0
+            self.log(f"⚠ planner: {e}")
+        self.issues = check_program(
+            self.tp, max_depth_mm=self.settings.check_max_depth_mm,
+            max_feed_mm_min=self.ctl.make_planner(prog).max_feed_mm_min,
+            area=self._area_lohi())
+        self._fill_checks()
+        self.gcode_view.set_issues((i.line, i.severity) for i in self.issues)
+        self._marker = None
+        self._sel_line = 0
+        self.playing = False
+        self.play_timer.stop()
+        self.play_idx = 0
+        self.play_slider.blockSignals(True)
+        self.play_slider.setRange(0, self.timeline.ticks if self.timeline else 0)
+        self.play_slider.setValue(0)
+        self.play_slider.blockSignals(False)
+        for v in self._views():
+            v.set_toolpath(self.tp)
+            v.set_done(None, 0)
+            v.set_marker(None)
+        self._show_job_info()
+        self._sync_views()
+
+    def _fill_checks(self) -> None:
+        self.checks_list.clear()
+        if not self.issues:
+            it = QListWidgetItem("✓ No problems found")
+            it.setForeground(QColor("#2e7d32"))
+            self.checks_list.addItem(it)
+            self.bottom_tabs.setTabText(2, "Checks")
+            return
+        for i in self.issues:
+            icon = "✖" if i.severity == ERROR else "⚠"
+            it = QListWidgetItem(f"{icon}  line {i.line}: {i.text}")
+            it.setData(Qt.UserRole, i.line)
+            it.setForeground(QColor("#c62828" if i.severity == ERROR else "#e65100"))
+            self.checks_list.addItem(it)
+        self.bottom_tabs.setTabText(2, f"Checks ({len(self.issues)})")
 
     def _job_start(self) -> tuple[float, float, float]:
         return self.ctl.work_mm() if self.ctl.connected else (0.0, 0.0, 0.0)
+
+    def _area_lohi(self):
+        """Machine work area in work coordinates, or None if home not set."""
+        c = self.ctl
+        if not c.state.home_set:
+            return None
+        lo, hi = [], []
+        for i in range(3):
+            a, b = c.limit_range(i)
+            off = c.state.work_offset[i]
+            lo.append((a - off) * c.mmps(i))
+            hi.append((b - off) * c.mmps(i))
+        import numpy as np
+        return np.array(lo), np.array(hi)
 
     def _show_job_info(self) -> None:
         prog = self.job_prog
@@ -469,13 +621,16 @@ class MainWindow(QMainWindow):
         if b:
             parts.append(f"X {b[0][0]:.2f}…{b[1][0]:.2f}  Y {b[0][1]:.2f}…{b[1][1]:.2f}  "
                          f"Z {b[0][2]:.2f}…{b[1][2]:.2f} mm")
-        maxf = self.ctl.make_planner(prog).max_feed_mm_min
-        if prog.max_feed > maxf + 0.5:
-            parts.append(f"<span style='color:#e65100'>Feed F{prog.max_feed:g} is above the "
-                         f"machine maximum ({maxf:.0f} mm/min) - it will run slower.</span>")
+        n_err = sum(1 for i in self.issues if i.severity == ERROR)
+        if n_err:
+            parts.append(f"<span style='color:#c62828'><b>{n_err} problem(s)</b> - "
+                         "see the Checks tab</span>")
+        elif self.issues:
+            parts.append(f"<span style='color:#e65100'>{len(self.issues)} warning(s) - "
+                         "see the Checks tab</span>")
         if prog.warnings:
-            parts.append(f"<span style='color:#e65100'>{len(prog.warnings)} note(s) in console"
-                         "</span>")
+            parts.append(f"<span style='color:#757575'>{len(prog.warnings)} G-code note(s) "
+                         "in the console</span>")
         self.job_info.setText("<br>".join(parts))
 
     def run_job(self) -> None:
@@ -490,10 +645,15 @@ class MainWindow(QMainWindow):
         if problems:
             QMessageBox.warning(self, "Run", "Cannot run this job:\n\n" + "\n".join(problems))
             return
+        self._set_program(prog)  # re-plan from the real start position
         wp = self.ctl.work_mm()
         msg = (f"Run {os.path.basename(self.job_path or 'job')}?\n\n"
                f"Tool is at work X {wp[0]:.3f}  Y {wp[1]:.3f}  Z {wp[2]:.3f}.\n"
                f"Estimated time: {_hms(self._job_secs)}.\n")
+        n_err = sum(1 for i in self.issues if i.severity == ERROR)
+        if n_err:
+            msg += (f"\n⚠ The checks found {n_err} PROBLEM(S) (see the Checks tab).\n"
+                    "Run anyway?\n")
         if not self.ctl.limits_active():
             msg += "\nSoft limits are OFF (machine home not set) - bounds are not checked."
         if prog.uses_spindle:
@@ -505,8 +665,6 @@ class MainWindow(QMainWindow):
         except (RuntimeError, GCodeError) as e:
             QMessageBox.warning(self, "Run", str(e))
             return
-        self.job_prog = prog
-        self.preview.set_program(prog)
         self.log(f"Job started: {self.ctl.job.name}")
 
     def pause_resume_job(self) -> None:
@@ -520,19 +678,34 @@ class MainWindow(QMainWindow):
 
     def _on_job_event(self, job) -> None:
         if job.state == PAUSED_STATE:
+            self._marker = self.ctl.work_mm()
             self.log(f"Job paused at line {job.line}: {job.message}")
             if job.message and job.message != "Paused":
                 QMessageBox.information(self, "Job paused",
                                         f"{job.message}\n\nPress Resume to continue.")
         elif job.state == DONE:
+            self._marker = None
             self.log(f"Job finished in {_hms(job.elapsed())}")
-            self.preview.set_progress_line(10 ** 9)
         elif job.state in (STOPPED, FAILED):
+            self._marker = self.ctl.work_mm()
             self.log(f"Job stopped at line {job.line}: {job.message}")
             if job.state == FAILED:
                 QMessageBox.warning(self, "Job stopped", job.message)
-        elif job.state == RUNNING and job.ticks_sent:
-            self.log("Job resumed")
+        elif job.state == RUNNING:
+            self._marker = None
+            if job.ticks_sent:
+                self.log("Job resumed")
+        self._sync_views()
+
+    def _job_index(self) -> int:
+        """Ticks the machine has (about) executed, as a timeline index."""
+        job = self.ctl.job
+        if job is None or self.timeline is None:
+            return 0
+        if job.state == DONE:
+            return self.timeline.ticks
+        q = self.ctl.link.queue_size() if self.ctl.connected else 0
+        return max(0, min(self.timeline.ticks, job.ticks_sent - (q + 1) * 3))
 
     def _refresh_job(self) -> None:
         job = self.ctl.job
@@ -541,25 +714,164 @@ class MainWindow(QMainWindow):
         rel = con and self.ctl.link.released
         self.open_btn.setEnabled(not active)
         self.run_btn.setEnabled(bool(self.job_text) and con and not rel and not active
-                                and self.ctl.position_valid)
+                                and self.ctl.position_valid and not self.al.running)
         self.pause_btn.setEnabled(active and job.state in (RUNNING, PAUSED_STATE))
         self.pause_btn.setText("▶ Resume" if active and job.state == PAUSED_STATE else "⏸ Pause")
         self.stopjob_btn.setEnabled(active)
-        if job is None:
+        for w in (self.play_btn, self.play_slider, self.play_speed, self.to_sel_btn,
+                  self.reset_play_btn):
+            w.setEnabled(not active and self.timeline is not None)
+        if job is not None:
+            frac = job.progress()
+            self.job_bar.setValue(int(frac * 1000))
+            left = max(job.total_ticks - job.ticks_sent, 0) * TICK_SECONDS
+            names = {RUNNING: "Running", PAUSING: "Pausing…", PAUSED_STATE: "Paused",
+                     STOPPING: "Stopping…", DONE: "Done", STOPPED: "Stopped",
+                     FAILED: "Failed"}
+            self.job_status.setText(
+                f"{names.get(job.state, job.state)} · line {job.line}/"
+                f"{job.program.line_count} · {frac * 100:.0f}% · "
+                f"{_hms(job.elapsed())} / left {_hms(left)}")
+        else:
             self.job_bar.setValue(0)
             self.job_status.setText("")
+        self._sync_views()
+
+    # ---------------------------------------------------------------- auto-level
+    def _transformed(self, prog: Program) -> Program:
+        hm = self.al.active_map() if hasattr(self, "al") else None
+        return apply_heightmap(prog, hm) if hm is not None else prog
+
+    def reapply_job(self) -> None:
+        """Height map switched on/off: re-plan preview and future runs."""
+        hm = self.al.active_map()
+        self.ctl.program_transform = (lambda p: apply_heightmap(p, hm)) if hm else None
+        if hm is not None:
+            self.log("Height map applied to the job")
+        if self.job_prog_raw is not None and not self.ctl.job_active:
+            self._set_program(self._transformed(self.job_prog_raw))
+
+    def show_heightmap(self, hm) -> None:
+        for v in self._views():
+            v.set_heightmap(hm)
+
+    # ---------------------------------------------------------------- views
+    def _views(self) -> list:
+        use3d = self.view3d is not None and self.settings.view_quality != "2d"
+        return [self.preview] + ([self.view3d] if use3d else [])
+
+    def _sync_views(self) -> None:
+        """Push tool / progress / marker / area to the visible view."""
+        if not hasattr(self, "play_lbl"):
             return
-        frac = job.progress()
-        self.job_bar.setValue(int(frac * 1000))
-        el = job.elapsed()
-        left = max(job.total_ticks - job.ticks_sent, 0) * TICK_SECONDS
-        names = {RUNNING: "Running", PAUSING: "Pausing…", PAUSED_STATE: "Paused",
-                 STOPPING: "Stopping…", DONE: "Done", STOPPED: "Stopped", FAILED: "Failed"}
-        self.job_status.setText(
-            f"{names.get(job.state, job.state)} · line {job.line}/{job.program.line_count} · "
-            f"{frac * 100:.0f}% · {_hms(el)} / left {_hms(left)}")
-        if active:
-            self.preview.set_progress_line(job.line)
+        c = self.ctl
+        job_view = c.job is not None and (c.job_active or c.job.state in (DONE, STOPPED, FAILED)) \
+            and self.play_idx == 0
+        tl = self.timeline
+        if job_view:
+            idx = self._job_index()
+            tool = c.work_mm()
+            line = c.job.line if c.job_active else 0
+        elif tl is not None and self.play_idx > 0:
+            idx = self.play_idx
+            tool = tuple(tl.pos[idx])
+            line = int(tl.lines[idx])
+        else:
+            idx, tool, line = 0, c.work_mm(), 0
+        visible = self.view_tabs.currentWidget()
+        area = self._area_lohi()
+        for v in self._views():
+            if v is not visible:
+                continue
+            v.set_tool(*tool)
+            v.set_done(tl, idx)
+            v.set_marker(self._marker)
+            v.set_area(area)
+        if self.bottom_tabs.currentWidget() is self.gcode_view:
+            self.gcode_view.set_current(line)
+        if tl is not None:
+            self.play_lbl.setText(f"{_hms(self.play_idx * TICK_SECONDS)} / {_hms(tl.seconds)}")
+
+    def set_quality(self, q: str) -> None:
+        self.settings.view_quality = q
+        self.settings.save()
+        self._apply_quality()
+
+    def _apply_quality(self) -> None:
+        """2D only: hide the 3D tab (the OpenGL widget is kept alive - pyqtgraph
+        cannot safely create a second one after the first is destroyed)."""
+        q = self.settings.view_quality
+        if q == "2d":
+            if self.view3d is not None:
+                self.view_tabs.setTabVisible(self.view_tabs.indexOf(self.view3d), False)
+                self.view_tabs.setCurrentWidget(self.preview)
+            return
+        if self.view3d is None:
+            from .view3d import View3D  # OpenGL only loaded when wanted
+            self.view3d = View3D(q)
+            self.view_tabs.addTab(self.view3d, "3D")
+        else:
+            self.view_tabs.setTabVisible(self.view_tabs.indexOf(self.view3d), True)
+            self.view3d.set_quality(q)
+        if self.tp is not None and self.view3d.tp is not self.tp:
+            self.view3d.set_toolpath(self.tp)
+        self._sync_views()
+
+    def select_line(self, line: int, from_text: bool = False) -> None:
+        if not line:
+            return
+        self._sel_line = line
+        sl = self.tp.segments_for_line(line) if self.tp is not None else None
+        for v in self._views():
+            v.set_selected(sl)
+        if not from_text:
+            self.gcode_view.set_selected(line)
+            if self.bottom_tabs.currentWidget() is self.console.parentWidget():
+                self.bottom_tabs.setCurrentWidget(self.gcode_view)
+
+    # ---------------------------------------------------------------- playback
+    def toggle_playback(self) -> None:
+        if self.timeline is None or self.ctl.job_active:
+            return
+        self.playing = not self.playing
+        if self.playing:
+            if self.play_idx >= self.timeline.ticks:
+                self._set_play_idx(0)
+            self._play_t = time.monotonic()
+            self.play_timer.start()
+            self.bottom_tabs.setCurrentWidget(self.gcode_view)
+        else:
+            self.play_timer.stop()
+        self.play_btn.setText("⏸ Simulate" if self.playing else "▶ Simulate")
+
+    def _play_step(self) -> None:
+        now = time.monotonic()
+        dt, self._play_t = now - self._play_t, now
+        if self.timeline is None:
+            return
+        k = self.play_speed.currentData()
+        nxt = self.play_idx + max(1, int(dt * k / TICK_SECONDS))
+        if nxt >= self.timeline.ticks:
+            nxt = self.timeline.ticks
+            self.toggle_playback()
+        self._set_play_idx(nxt)
+
+    def _set_play_idx(self, idx: int, stop: bool = False) -> None:
+        if stop and self.playing:
+            self.toggle_playback()
+        self.play_idx = idx
+        self.play_slider.blockSignals(True)
+        self.play_slider.setValue(idx)
+        self.play_slider.blockSignals(False)
+        self._sync_views()
+
+    def _slider_moved(self, v: int) -> None:
+        self.play_idx = v
+        self._sync_views()
+
+    def _play_to_selected(self) -> None:
+        if self.timeline is not None and self._sel_line:
+            self._set_play_idx(self.timeline.index_for_line(self._sel_line))
 
     # ================================================================ events
     def _on_event(self, ev: str, payload: object) -> None:
@@ -594,6 +906,9 @@ class MainWindow(QMainWindow):
             self._overload = False
         elif ev == EV_PROBE:
             self.log(f"Probe touch (machine value {payload})")
+            self.al.on_probe_event(payload)
+        elif ev.startswith("al_"):
+            self.al.on_event(ev, payload)
         elif ev == EV_JOB:
             self._on_job_event(payload)
         self._refresh()
@@ -644,8 +959,10 @@ class MainWindow(QMainWindow):
         self.banner.setText("\n".join(msgs))
         self.banner.setVisible(bool(msgs))
 
+        al_busy = self.al.running
         for w in self.jog_widgets:
-            w.setEnabled(con and not rel and not c.job_active)
+            w.setEnabled(con and not rel and not c.job_active and not al_busy)
+        self.al.refresh()
 
         wp, mp = c.work_mm(), c.machine_mm()
         color = "" if valid else "color:#9e9e9e;"
@@ -658,13 +975,6 @@ class MainWindow(QMainWindow):
         self.spindle_btn.setChecked(sp)
         self.spindle_btn.setText("Spindle ON" if sp else "Spindle OFF")
         self.spindle_btn.setStyleSheet("background:#fdd835; font-weight:bold;" if sp else "")
-        self.preview.set_tool(wp[0], wp[1])
-        if c.state.home_set:
-            off = [c.state.work_offset[i] * c.mmps(i) for i in range(2)]
-            area = c.settings.work_area_mm
-            self.preview.set_area(QRectF(-off[0], -off[1], area[0], area[1]))
-        else:
-            self.preview.set_area(None)
         self._refresh_job()
         self.home_lbl.setText("Soft limits: ON" if c.limits_active()
                               else "Soft limits: off (home not set)")
@@ -712,6 +1022,15 @@ class MainWindow(QMainWindow):
         self.ctl.disconnect()
         self.settings.save()
         e.accept()
+
+
+def demo_board_surface(x: int, y: int) -> int:
+    """Simulator's virtual PCB (steps): 3 mm below the start position, tilted
+    0.1 mm per 50 mm in X and warped 0.08 mm in the middle - for trying auto-level."""
+    import math
+    xm, ym = x * 0.004, y * 0.004
+    z = -3.0 + 0.002 * xm + 0.08 * math.sin(min(max(xm / 60, 0), 1) * math.pi)         * math.sin(min(max(ym / 40, 0), 1) * math.pi)
+    return round(z / 0.004)
 
 
 def _hms(secs: float) -> str:

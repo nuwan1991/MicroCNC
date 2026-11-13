@@ -105,6 +105,7 @@ class SerialLink:
         self.position_valid = True
         self.released = False
         self.spindle = False
+        self.last_probe_in_motion = False
 
     # ------------------------------------------------------------ lifecycle
     @property
@@ -276,9 +277,15 @@ class SerialLink:
             self.spindle = False
             self._emit(EV_OVERLOAD, None)
         elif code == ReplyCode.PROBE:
-            # Motion stopped part-way through this packet; exact steps done
-            # are unknown, so position is no longer exact.
-            self._drain()
-            self.position_valid = False
+            # value = the machine's own absolute Z step counter at contact.
+            moving = (pkt is not None and len(pkt) == 7 and pkt[0] in (HEADER_MOTION, HEADER_JOG)
+                      and any(not t.is_zero() for t in decode_packet(pkt)[1]))
+            self.last_probe_in_motion = moving
+            if moving:
+                # Motion stopped part-way through this packet; how many of its
+                # steps were done is unknown, so our count is no longer exact.
+                self._drain()
+                self.position_valid = False
+            # else: contact seen while idle (keep-alive) - nothing moved.
             self._emit(EV_PROBE, reply.value)
         # unknown codes are ignored (visible via traffic log)

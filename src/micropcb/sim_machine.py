@@ -18,7 +18,8 @@ class SimMachine:
     port = "SIM"
 
     def __init__(self, realtime: bool = True, probe_z: int | None = None,
-                 surface: "Callable[[int, int], int] | None" = None) -> None:
+                 surface: "Callable[[int, int], int] | None" = None,
+                 fw_z_offset: int = 0) -> None:
         self.realtime = realtime
         self.timeout = 0.5
         self.pos = [0, 0, 0]
@@ -30,6 +31,9 @@ class SimMachine:
         # surface(x_steps, y_steps) -> z_steps of the board surface; overrides probe_z
         self.surface = surface
         self.probe_count = 0
+        # The real firmware reports its own absolute Z step counter, whose origin
+        # differs from the PC's count (it runs since power-on).
+        self.fw_z_offset = fw_z_offset
         self.performance = None
         self.written: list[bytes] = []
         self._rx: deque[tuple[float, bytes]] = deque()
@@ -115,11 +119,14 @@ class SimMachine:
             surf = self._surface_z() if header == HEADER_JOG else None
             for t in ticks:
                 self.spindle = t.spindle
+                if surf is not None and t.z < 0 and self.pos[2] <= surf:
+                    # already touching: firmware does not move further down (capture 1)
+                    t = type(t)(t.x, t.y, 0, t.spindle)
                 for _ in range(abs(t.z)):
                     self.pos[2] += 1 if t.z > 0 else -1
                     if surf is not None and t.z < 0 and self.pos[2] <= surf:
                         self.probe_count += 1
-                        v = self.pos[2] & 0xFFFF
+                        v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
                         return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
                 self.pos[0] += t.x
                 self.pos[1] += t.y

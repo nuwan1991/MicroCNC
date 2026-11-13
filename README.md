@@ -1,16 +1,18 @@
 # MicroPCB
 
 Control software for Wegstr CNC machines, focused on PCB milling.
-Status: **milestone 1.3** — G-code jobs (run / pause / stop) with 2D preview, on top of
-the GUI (1.2) and the protocol / serial link / simulator (1.1).
+Status: **Stage 2.3** — 3D view, G-code viewer, job checks, simulated playback and
+live job view and auto-level (height map), on top of G-code jobs (1.3), the GUI (1.2)
+and the protocol / serial link / simulator (1.1).
 
 Docs: [protocol](docs/protocol.md) · [Stage 1 design](docs/stage1-design.md) ·
+[Stage 2](docs/stage2-design.md) ·
 [capture guide](docs/capture-guide.md)
 
 ## Setup (once)
 ```
 python -m venv .venv
-.venv\Scripts\python -m pip install -e .[dev]
+.venv\Scripts\python -m pip install -e .[dev]     # also after updates (new: numpy, pyqtgraph, PyOpenGL)
 ```
 
 ## Run
@@ -49,6 +51,8 @@ Close the original Wegstr software first (only one program can use the port).
 | `src/micropcb/planner.py` | speed planning, corners, accel ramp -> step ticks |
 | `src/micropcb/job.py` | job thread: streaming, pause / resume / stop |
 | `src/micropcb/controller.py` | position, zero, soft limits, jog, jobs |
-| `src/micropcb/ui/` | main window, 2D preview, settings |
+| `src/micropcb/toolpath.py` | toolpath arrays, playback timeline, job checks |
+| `src/micropcb/autolevel.py` | probe grid, height map, toolpath correction |
+| `src/micropcb/ui/` | main window, 2D/3D views, G-code viewer, settings |
 | `src/micropcb/bridge/` | bridge for the original Wegstr software |
 | `examples/aircut-test.nc` | air-cut test job for milestone 1.3 |

@@ -200,7 +200,7 @@ Answer these with a serial sniffer while using the original software:
 1. Tick period (how long the machine takes per tick → max feed rate).
 2. Meaning of `performance` byte in `7F xx` (try values 1..10).
 3. Exact trigger for reply `03` (E-stop button? motor disable? lid?).
-4. Units/sign of the 16-bit value in reply `04`.
+4. ~~Units/sign of the 16-bit value in reply `04`.~~ Answered: machine's absolute Z step counter (signed 16-bit); the original uses differences to the first probe. See stage2-design.md §2.4.
 5. Does the machine need keep-alive `7F` to stay enabled? What happens if
    it stops?
 6. Any per-axis direction inversion or homing/limit switches? (none found

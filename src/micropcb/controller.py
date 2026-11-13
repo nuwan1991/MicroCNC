@@ -10,11 +10,17 @@ Coordinates
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Callable
+
+import numpy as np
 
 from .gcode import Program, parse
 from .job import Job
+from .autolevel import HeightMap, probe_order
 from .jog import jog_ticks, pack
+from .protocol import HEADER_JOG, Tick, encode_packet
 from .planner import Planner
 from .serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_IDLE, EV_LOST,
                           EV_OVERLOAD, EV_PROBE, EV_RELEASED, SerialLink,
@@ -38,6 +44,13 @@ class MachineController:
         self.port: str | None = None
         self.was_unclean = not self.state.clean_exit
         self.job: Job | None = None
+        # probing (Stage 2.4)
+        self._probe_wait: threading.Event | None = None
+        self._probe_value: int | None = None
+        self.last_probe_value: int | None = None
+        self.fw_z_offset: int | None = None   # PC Z steps - machine Z counter
+        self.probe_log: list[str] = []
+        self.program_transform: Callable[[Program], Program] | None = None
 
     # ------------------------------------------------------------ helpers
     def _new_link(self) -> SerialLink:
@@ -50,6 +63,18 @@ class MachineController:
             pass
 
     def _on_link_event(self, ev: str, payload: object) -> None:
+        if ev == EV_PROBE:
+            self.last_probe_value = payload
+            if self._probe_wait is not None:
+                # our own probe cycle: it restores the position itself
+                self._probe_value = payload
+                self._probe_wait.set()
+                self._emit(ev, payload)
+                return
+            if not self.link.last_probe_in_motion:
+                # contact while idle (e.g. clip touched to the tool): harmless
+                self._emit(ev, payload)
+                return
         if ev in (EV_RELEASED, EV_PROBE, EV_LOST) and (ev != EV_RELEASED or payload):
             # step counting can no longer be trusted
             self.state.home_set = False
@@ -84,6 +109,7 @@ class MachineController:
         if self.connected:
             return self.port or ""
         self.link = self._new_link()
+        self.fw_z_offset = None  # machine may have been power-cycled
         if transport is not None:
             self.link.open(transport)
             self.port = getattr(transport, "port", "SIM")
@@ -236,6 +262,124 @@ class MachineController:
         return self.link.wait_idle(timeout)
 
 
+    # ------------------------------------------------------------ probing
+    def probe(self, max_travel_mm: float, steps_per_tick: int = 3,
+              stop: threading.Event | None = None) -> float:
+        """Move Z down until the tool touches the copper (clip on the board).
+
+        Returns the work Z (mm) of the touch and leaves the tool there; the
+        position is exact afterwards (from the machine's Z counter).
+        Raises ProbeError if nothing is touched within max_travel_mm.
+        """
+        self._require_ready()
+        if self.busy():
+            raise RuntimeError("machine is moving")
+        if self.link.spindle:
+            raise RuntimeError("switch the spindle off before probing")
+        was_valid = self.link.position_valid
+        mz = self.mmps(2)
+        spt = max(1, min(int(steps_per_tick), self.settings.max_steps_per_tick))
+        remaining = round(max_travel_mm / mz)
+        tick = Tick(z=-spt)
+        self._probe_value = None
+        self._probe_wait = threading.Event()
+        try:
+            while remaining > 0 and not self._probe_wait.is_set():
+                if stop is not None and stop.is_set():
+                    self.link.stop()
+                    raise ProbeCancelled("probing cancelled")
+                if self.link.queue_size() >= 2:
+                    time.sleep(0.003)
+                    continue
+                n = min(3, -(-remaining // spt))
+                ticks = [Tick(z=-min(spt, remaining - k * spt)) for k in range(n)]
+                ticks = [t for t in ticks if t.z < 0] or [tick]
+                ticks += [Tick()] * (3 - len(ticks))
+                remaining -= sum(-t.z for t in ticks)
+                self.link.send([encode_packet(ticks, HEADER_JOG)])
+            while not self._probe_wait.is_set() and not self.link.wait_idle(0.05):
+                if not self.connected:
+                    raise RuntimeError("connection lost while probing")
+            touched = self._probe_wait.wait(0.3)
+            if not touched:
+                raise ProbeError(f"No touch within {max_travel_mm:.2f} mm - is the clip on the "
+                                 "copper and the tool above the board?")
+            self.link.wait_idle(2)
+            value = int(self._probe_value)  # type: ignore[arg-type]
+        finally:
+            self._probe_wait = None
+        before = self.link.position  # counted steps exclude the packet that hit
+        x, y, zb = before
+        if self.fw_z_offset is None:
+            # first touch: the packet in flight did 1..3*spt steps; take the middle
+            guess = zb - max(1, round(1.5 * spt))
+            self.fw_z_offset = guess - value
+            self.probe_log.append(f"probe reference: machine counter {value}, PC Z {guess}")
+            z_touch = guess
+        else:
+            z_touch = value + self.fw_z_offset
+            z_touch += round((zb - z_touch) / 65536) * 65536  # 16-bit wrap
+            if not (zb - 3 * spt - 2 <= z_touch <= zb + 2):
+                self.probe_log.append(f"⚠ probe value {value} does not match PC Z {zb}")
+                raise ProbeError(
+                    "The machine's probe value does not match the expected height "
+                    f"(counter {value}, PC expects {zb - 3 * spt}…{zb}). Position may be "
+                    "wrong - re-zero Z before cutting.")
+        self.link.set_position(x, y, z_touch)
+        self.link.position_valid = was_valid
+        self.save_state()
+        self._emit(EV_STATE)
+        return (z_touch - self.state.work_offset[2]) * mz
+
+    def run_autolevel(self, hm: HeightMap, *, clearance_mm: float = 1.0,
+                      first_travel_mm: float = 5.0, extra_travel_mm: float = 1.0,
+                      probe_spt: int = 3, stop: threading.Event | None = None,
+                      on_point: Callable[[int, int, float], None] | None = None) -> HeightMap:
+        """Probe every grid point (work X/Y) and fill hm.z (mm, first point = 0).
+
+        Start with the tool above the first point area, at most first_travel_mm
+        above the copper. Work Z 0 is set to the copper at the first point.
+        """
+        self._require_ready()
+        if not self.position_valid:
+            raise RuntimeError("position is not reliable - set work zero first")
+        order = probe_order(len(hm.xs), len(hm.ys))
+        hm.z[:] = float("nan")
+        top = 0.0  # highest surface measured so far (work mm)
+        for n, (i, j) in enumerate(order):
+            if stop is not None and stop.is_set():
+                raise ProbeCancelled("auto-level cancelled")
+            x, y = float(hm.xs[i]), float(hm.ys[j])
+            wx, wy, wz = self.work_mm()
+            if n:
+                travel_z = top + clearance_mm
+                if wz < travel_z:
+                    self.jog("z", travel_z - wz)
+            self.jog("x", x - wx)
+            self.jog("y", y - wy)
+            if not self.wait_idle(120):
+                raise RuntimeError("move did not finish")
+            px, py, _ = self.work_mm()
+            if abs(px - x) > 0.01 or abs(py - y) > 0.01:
+                raise ProbeError(f"Probe point X {x:.2f} Y {y:.2f} is outside the work area "
+                                 "(soft limits)")
+            if n == 0:
+                z = self.probe(first_travel_mm, max(1, probe_spt - 1), stop)
+                self.zero_axes("z")  # copper at the first point = work Z 0
+                z = 0.0
+            else:
+                travel = self.work_mm()[2] - (np.nanmin(hm.z) - extra_travel_mm)
+                z = self.probe(travel, probe_spt, stop)
+            hm.z[j, i] = z
+            top = max(top, z)
+            self.jog("z", clearance_mm)
+            self.wait_idle(30)
+            if on_point is not None:
+                on_point(i, j, z)
+        hm.meta.update({"points": hm.probed, "clearance_mm": clearance_mm,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S")})
+        return hm
+
     # ------------------------------------------------------------ jobs
     @property
     def job_active(self) -> bool:
@@ -252,7 +396,10 @@ class MachineController:
 
     def program_for_run(self, text: str) -> Program:
         """Parse with the current work position as the start point."""
-        return parse(text, self.work_mm() if self.connected else (0.0, 0.0, 0.0))
+        prog = parse(text, self.work_mm() if self.connected else (0.0, 0.0, 0.0))
+        if self.program_transform is not None:  # e.g. auto-level height map
+            prog = self.program_transform(prog)
+        return prog
 
     def check_program(self, prog: Program) -> list[str]:
         """Problems that block running (empty list = OK)."""
@@ -308,6 +455,14 @@ class MachineController:
     def stop_job(self) -> None:
         if self.job_active:
             self.job.stop()  # type: ignore[union-attr]
+
+
+class ProbeError(RuntimeError):
+    pass
+
+
+class ProbeCancelled(RuntimeError):
+    pass
 
 
 __all__ = ["MachineController", "EV_STATE", "EV_CONNECTED", "EV_JOB"]
