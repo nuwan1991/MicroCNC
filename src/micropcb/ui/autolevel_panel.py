@@ -87,8 +87,7 @@ class AutoLevelPanel(QWidget):
         self.speed.setRange(1, 14)
         self.speed.setValue(14)
         self.speed.setSuffix(" steps/tick")
-        self.speed.setToolTip("Z steps per probe move (one move per packet, ≈57 mm/min at 14).
-"
+        self.speed.setToolTip("Z steps per probe move (one move per packet, ≈57 mm/min at 14).\n"
                               "Your machine does not report touches at 3; the original uses 14.")
         f2.addRow("Spacing", self.spacing)
         f2.addRow("Margin", self.margin)
