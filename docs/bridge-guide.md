@@ -125,3 +125,27 @@ The bridge log + MicroPCB console (Show raw traffic) record everything —
 send them if a probe check fails.
 (MicroPCB does not need the bridge on the real machine; it is only for
 watching the traffic.)
+
+## 7. Recording serial data (version 0.2)
+Box **Record serial data (timed capture)** in the bridge window:
+- **● Record** starts a capture, **■ Stop recording** ends it. **Record on Start** records
+  automatically from bridge Start to Stop.
+- Files go to `Documents\MicroPCB captures` (change with **Folder…**):
+  - `capture-YYYYMMDD-HHMMSS.csv` – one row per packet / reply, time in seconds (µs
+    resolution, taken in the bridge threads), direction, bytes, decoded ticks, spindle bits,
+    step counter X/Y/Z, gap to the previous row, reply time after the last packet, notes
+    (probe counter value, split replies, stops). Header lines `#` say mode, ports, version.
+  - `…-report.txt` – summary: packet / reply counts, reply time statistics per packet kind,
+    real time per tick while streaming, max steps per tick, travel and range, spindle
+    on/off times, keep-alive interval, probe touches, long pauses, slow replies,
+    overload / release events.
+  - `…-motion.nc` – the motion the Wegstr software actually sent, rebuilt as G-code
+    (straight segments, F from the real timing, jog / job sections, M3/M5).
+- **Analyze capture…** makes the report and .nc again from any capture CSV; the same from
+  the command line:
+  `.venv\Scripts\python -m micropcb.bridge.analyze "path\capture-….csv"`
+- **Save log…** saves the traffic window text.
+
+For analysis by Claude: run a G-code job in the Wegstr software with recording on, then
+send the `.csv` (and the original `.nc` job) — the timing shows how the original software
+streams, ramps and waits, and the motion file can be compared with the job.

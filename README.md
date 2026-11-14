@@ -1,7 +1,7 @@
 # MicroPCB
 
 Control software for Wegstr CNC machines, focused on PCB milling.
-Status: **Stage 4** — fixed bed camera: calibration, board alignment from holes / pads,
+Status: **0.2.0** — bridge records timed serial captures + report (docs/bridge-guide.md §7); **Stage 4** — fixed bed camera: calibration, board alignment from holes / pads,
 obstacle warnings, PCB / toolpath overlay on the live picture; Stage 3: PCB import (Gerber / Excellon from KiCad, EasyEDA), isolation
 routing, copper clearing, drilling, cutout with tabs, tool changes, double-sided
 boards with alignment pins; on top of Stage 2 (3D view, G-code viewer, checks, playback, auto-level) and

@@ -65,6 +65,15 @@ class Bridge:
         self._run = threading.Event()
         self._threads: list[threading.Thread] = []
         self.stats = {"packets": 0, "replies": 0, "probes": 0, "reassembled": 0}
+        self.recorder = None     # bridge.recorder.Recorder while recording
+
+    def _rec(self, direction: str, data: bytes, note: str = "", t: float | None = None) -> None:
+        r = self.recorder
+        if r is not None:
+            try:
+                r.record(direction, data, note, t)
+            except Exception:
+                pass
 
     def _emit(self, ev: str, payload: object) -> None:
         try:
@@ -116,7 +125,9 @@ class Bridge:
                 return
             if not data:
                 continue
+            t_in = time.perf_counter()
             for pkt in framer.feed(data):
+                self._rec("TX", pkt, t=t_in)
                 try:
                     self.back.write(pkt)
                 except Exception as e:
@@ -136,7 +147,7 @@ class Bridge:
             except Exception as e:
                 self._fail("machine port", e)
                 return
-            now = time.monotonic()
+            now = time.perf_counter()
             if data:
                 reads_in_reply += 1
                 replies = parser.feed(data)
@@ -144,9 +155,11 @@ class Bridge:
                     partial_since = partial_since or now
                 for r in replies:
                     out = encode_reply(r)
+                    note = ""
                     if r.code == ReplyCode.PROBE:
                         self.stats["probes"] += 1
                         if reads_in_reply > 1:
+                            note = f"re-assembled from {reads_in_reply} reads"
                             self.stats["reassembled"] += 1
                             self._emit(EV_REASSEMBLED, r.value)
                     try:
@@ -155,6 +168,7 @@ class Bridge:
                         self._fail("Wegstr side port", e)
                         return
                     self.stats["replies"] += 1
+                    self._rec("RX", out, note, t=now)
                     self._emit(EV_RX, out)
                 if not parser.pending():
                     partial_since = None
@@ -166,6 +180,7 @@ class Bridge:
                 partial_since = None
                 reads_in_reply = 0
                 self._emit(EV_LOG, f"incomplete reply passed through: {raw.hex(' ')}")
+                self._rec("EV", raw, "incomplete reply passed through")
                 try:
                     self.front.write(raw)
                 except Exception as e:

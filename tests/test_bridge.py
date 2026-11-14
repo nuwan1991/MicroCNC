@@ -148,3 +148,43 @@ def test_power_cut_simulation_detected_by_link():
     time.sleep(0.5)
     assert "lost" in events
     br.stop()
+
+
+def test_recorder_capture_report_and_motion(tmp_path):
+    """Timed capture of real traffic -> CSV, report, reconstructed motion."""
+    from micropcb.bridge.analyze import analyze_file, load
+    from micropcb.bridge.recorder import Recorder
+    from micropcb.protocol import HEADER_MOTION
+    sim = SimMachine(realtime=False, surface=lambda x, y: -50 - x // 100)
+    pc, bridge_front = Pipe.pair()
+    br = Bridge(bridge_front, sim)
+    rec = Recorder(tmp_path, "t", {"mode": "test"})
+    br.recorder = rec
+    br.start()
+    link = SerialLink(lambda e, p: None, keepalive_interval=0.05)
+    try:
+        link.open(pc)
+        link.send(pack(jog_ticks("x", 500)))
+        assert link.wait_idle(5)
+        link.send(pack(jog_ticks("y", 250), header=HEADER_MOTION))
+        assert link.wait_idle(5)
+        link.send(pack(jog_ticks("z", -1000)))      # probe touch
+        assert link.wait_idle(5)
+        time.sleep(0.15)
+    finally:
+        link.close()
+        br.stop()
+    path = rec.close()
+    meta, rows = load(path)
+    assert "mode: test" in meta
+    assert {r.kind for r in rows} >= {"jog", "job", "keepalive", "ready", "probe"}
+    assert all(b.t >= a.t for a, b in zip(rows, rows[1:]))
+    job = [r for r in rows if r.kind == "job"]
+    assert job[-1].pos[:2] == (500, 250)
+    assert all(r.reply_ms is not None for r in rows if r.dir == "RX")
+    rp, mp, rep = analyze_file(path)
+    assert "probe" in rep and "Reply time" in rep and "travel  X 2.000  Y 1.000" in rep
+    nc = mp.read_text()
+    assert "X2.000 Y0.000" in nc and "X2.000 Y1.000" in nc
+    from micropcb.gcode import parse
+    assert parse(nc).lines()

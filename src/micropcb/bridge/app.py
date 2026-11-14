@@ -1,12 +1,15 @@
 """MicroPCB Bridge window:  python -m micropcb.bridge"""
 from __future__ import annotations
 
+import os
 import sys
 import time
+from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QObject, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+                               QFileDialog,
                                QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
                                QLabel, QMainWindow, QMessageBox, QPlainTextEdit,
                                QPushButton, QRadioButton, QVBoxLayout, QWidget)
@@ -14,7 +17,9 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBo
 from .. import __version__
 from ..protocol import BAUDRATE
 from ..sim_machine import SimMachine
+from .analyze import analyze_file
 from .core import EV_LOG, EV_REASSEMBLED, EV_RX, EV_STOPPED, EV_TX, Bridge
+from .recorder import Recorder, default_folder
 
 MM_PER_STEP = 0.004
 
@@ -44,6 +49,8 @@ class BridgeWindow(QMainWindow):
         self.setWindowTitle(f"MicroPCB Bridge {__version__}")
         self.bridge: Bridge | None = None
         self.sim: SimMachine | None = None
+        self.recorder: Recorder | None = None
+        self.qs = QSettings("MicroPCB", "Bridge")
         self.sig = _Sig()
         self.sig.event.connect(self._on_event, Qt.QueuedConnection)
         self._build()
@@ -139,6 +146,7 @@ class BridgeWindow(QMainWindow):
         reset.clicked.connect(self._sim_reset)
         sg.addWidget(reset, 4, 0, 1, 3)
         left.addWidget(self.simbox)
+        left.addWidget(self._build_recording())
         left.addStretch(1)
 
         # --- log
@@ -155,13 +163,118 @@ class BridgeWindow(QMainWindow):
         self.show_ka = QCheckBox("incl. keep-alive")
         clear = QPushButton("Clear")
         clear.clicked.connect(self.log_view.clear)
+        save = QPushButton("Save log…")
+        save.clicked.connect(self.save_log)
         lr.addWidget(self.show_traffic)
         lr.addWidget(self.show_ka)
         lr.addStretch(1)
+        lr.addWidget(save)
         lr.addWidget(clear)
         ll.addLayout(lr)
         root.addWidget(logbox, 1)
         self.resize(1050, 640)
+
+    # ------------------------------------------------------------ recording
+    def _build_recording(self) -> QGroupBox:
+        g = QGroupBox("Record serial data (timed capture)")
+        v = QVBoxLayout(g)
+        self.folder = self.qs.value("capture_folder", str(default_folder()))
+        h = QHBoxLayout()
+        self.rec_btn = QPushButton("● Record")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setMinimumHeight(32)
+        self.rec_btn.setToolTip("Write every packet and reply with its time (µs) to a CSV file.\n"
+                                "On stop a report and the reconstructed motion (.nc) are made.")
+        self.rec_btn.toggled.connect(self.toggle_record)
+        h.addWidget(self.rec_btn)
+        self.auto_rec = QCheckBox("Record on Start")
+        self.auto_rec.setChecked(self.qs.value("auto_record", "false") == "true")
+        self.auto_rec.toggled.connect(lambda on: self.qs.setValue("auto_record", on))
+        h.addWidget(self.auto_rec)
+        v.addLayout(h)
+        self.rec_lbl = QLabel()
+        self.rec_lbl.setWordWrap(True)
+        v.addWidget(self.rec_lbl)
+        h = QHBoxLayout()
+        for text, fn in (("Folder…", self.choose_folder), ("Open folder", self.open_folder),
+                         ("Analyze capture…", self.analyze_dialog)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            h.addWidget(b)
+        v.addLayout(h)
+        self._rec_label()
+        return g
+
+    def _rec_label(self) -> None:
+        r = self.recorder
+        if r:
+            self.rec_lbl.setText(f"<b style='color:#c62828'>● recording</b> {r.rows} rows, "
+                                 f"{r.now():.0f} s<br>{r.path.name}")
+        else:
+            self.rec_lbl.setText(f"Folder: {self.folder}")
+
+    def toggle_record(self, on: bool) -> None:
+        if on and self.recorder is None:
+            mode = "simulated machine" if self.rb_sim.isChecked() else "real machine"
+            meta = {"app": f"MicroPCB Bridge {__version__}", "mode": mode,
+                    "wegstr side port": self.front_box.currentData(),
+                    "machine port": "-" if self.rb_sim.isChecked() else self.back_box.currentData(),
+                    "mm per step": MM_PER_STEP,
+                    "dir": "TX = Wegstr software -> machine, RX = machine -> software"}
+            try:
+                self.recorder = Recorder(self.folder, "capture", meta)
+            except OSError as e:
+                QMessageBox.warning(self, "Record", f"Cannot create the file:\n{e}")
+                self.rec_btn.setChecked(False)
+                return
+            if self.bridge:
+                self.bridge.recorder = self.recorder
+            self.rec_btn.setText("■ Stop recording")
+            self.log(f"Recording to {self.recorder.path}")
+        elif not on and self.recorder is not None:
+            rec, self.recorder = self.recorder, None
+            if self.bridge:
+                self.bridge.recorder = None
+            path = rec.close()
+            self.rec_btn.setText("● Record")
+            self.log(f"Recording stopped: {rec.rows} rows in {path}")
+            self._analyze(path)
+        self._rec_label()
+
+    def _analyze(self, path) -> None:
+        try:
+            rp, mp, rep = analyze_file(path, MM_PER_STEP)
+        except Exception as e:
+            self.log(f"⚠ analysis failed: {e}")
+            return
+        for line in rep.splitlines():
+            self.log("  " + line)
+        self.log(f"Report: {rp}")
+        self.log(f"Motion as G-code: {mp}")
+
+    def choose_folder(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Capture folder", self.folder)
+        if d:
+            self.folder = d
+            self.qs.setValue("capture_folder", d)
+            self._rec_label()
+
+    def open_folder(self) -> None:
+        Path(self.folder).mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.folder))
+
+    def analyze_dialog(self) -> None:
+        p, _ = QFileDialog.getOpenFileName(self, "Capture file", self.folder, "Capture (*.csv)")
+        if p:
+            self._analyze(p)
+
+    def save_log(self) -> None:
+        p, _ = QFileDialog.getSaveFileName(
+            self, "Save log", os.path.join(self.folder, time.strftime("bridge-log-%Y%m%d-%H%M%S.txt")),
+            "Text (*.txt)")
+        if p:
+            Path(p).write_text(self.log_view.toPlainText(), encoding="utf-8")
+            self.log(f"Log saved: {p}")
 
     def log(self, s: str) -> None:
         self.log_view.appendPlainText(time.strftime("%H:%M:%S ") + s)
@@ -261,6 +374,9 @@ class BridgeWindow(QMainWindow):
                 return
             what = back_port
         self.bridge = Bridge(front, back, lambda e, p: self.sig.event.emit(e, p))
+        if self.auto_rec.isChecked() and self.recorder is None:
+            self.rec_btn.setChecked(True)
+        self.bridge.recorder = self.recorder
         self.bridge.start()
         self.log(f"Started: {front_port} ⇄ {what}. Connect Wegstr software to the "
                  f"other port of the com0com pair.")
@@ -281,6 +397,10 @@ class BridgeWindow(QMainWindow):
             self.log(str(p))
         elif ev == EV_STOPPED:
             self.log(f"Stopped ({p})")
+            if self.recorder is not None:
+                self.recorder.record("EV", b"", f"bridge stopped: {p}")
+                if self.auto_rec.isChecked():
+                    self.rec_btn.setChecked(False)
             self._update_state()
 
     def _update_state(self) -> None:
@@ -294,6 +414,8 @@ class BridgeWindow(QMainWindow):
         self._mode_changed()
 
     def _tick(self) -> None:
+        if self.recorder is not None:
+            self._rec_label()
         if self.bridge:
             s = self.bridge.stats
             self.stats_lbl.setText(f"Packets {s['packets']}   Replies {s['replies']}   "
@@ -307,6 +429,8 @@ class BridgeWindow(QMainWindow):
     def closeEvent(self, e) -> None:  # noqa: N802
         if self.running:
             self.bridge.stop("closing")
+        if self.recorder is not None:
+            self.rec_btn.setChecked(False)
         e.accept()
 
 
