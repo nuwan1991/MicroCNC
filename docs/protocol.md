@@ -227,3 +227,8 @@ spindle on/off → small G-code job → probe touch → press E-stop.
   starts with ramp 10,11,12… Use the counter, never the sent steps (MicroPCB does).
 - MicroPCB's planner estimate for PCB_test.txt (5109 ticks = 100.8 s) matches the original run
   (99.8 s) within 1 %.
+- **Touch is not reported at slow Z (capture 2026-11-14 17:01, MicroPCB):** probing with
+  `3F 60 40 60 40 60 40` (Z −3 per tick) the machine answered `01` to every packet while the
+  user touched the clip to the tool repeatedly — no `04`. The original probes at Z −14 per tick
+  and every touch is reported. MicroPCB now probes at 14 steps/tick, one moving tick per packet.
+  Lowest speed that still reports a touch: not yet known.

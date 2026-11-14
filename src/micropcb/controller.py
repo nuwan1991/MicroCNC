@@ -263,13 +263,19 @@ class MachineController:
 
 
     # ------------------------------------------------------------ probing
-    def probe(self, max_travel_mm: float, steps_per_tick: int = 3,
+    def probe(self, max_travel_mm: float, steps_per_tick: int = 14,
               stop: threading.Event | None = None) -> float:
         """Move Z down until the tool touches the copper (clip on the board).
 
         Returns the work Z (mm) of the touch and leaves the tool there; the
         position is exact afterwards (from the machine's Z counter).
         Raises ProbeError if nothing is touched within max_travel_mm.
+
+        Hardware (capture 2026-11-14 17:01): the machine does NOT report a touch
+        at 3 steps/tick (it keeps answering 01); the original software probes at
+        14 and every touch is reported. Each packet carries ONE moving tick and
+        two empty ones, so the step count of the packet that hit is uncertain by
+        at most one tick (14 steps = 0.056 mm), not three.
         """
         self._require_ready()
         if self.busy():
@@ -280,7 +286,6 @@ class MachineController:
         mz = self.mmps(2)
         spt = max(1, min(int(steps_per_tick), self.settings.max_steps_per_tick))
         remaining = round(max_travel_mm / mz)
-        tick = Tick(z=-spt)
         self._probe_value = None
         self._probe_wait = threading.Event()
         try:
@@ -291,11 +296,8 @@ class MachineController:
                 if self.link.queue_size() >= 2:
                     time.sleep(0.003)
                     continue
-                n = min(3, -(-remaining // spt))
-                ticks = [Tick(z=-min(spt, remaining - k * spt)) for k in range(n)]
-                ticks = [t for t in ticks if t.z < 0] or [tick]
-                ticks += [Tick()] * (3 - len(ticks))
-                remaining -= sum(-t.z for t in ticks)
+                ticks = [Tick(z=-min(spt, remaining)), Tick(), Tick()]
+                remaining -= -ticks[0].z
                 self.link.send([encode_packet(ticks, HEADER_JOG)])
             while not self._probe_wait.is_set() and not self.link.wait_idle(0.05):
                 if not self.connected:
@@ -312,18 +314,18 @@ class MachineController:
         x, y, zb = before
         if self.fw_z_offset is None:
             # first touch: the packet in flight did 1..3*spt steps; take the middle
-            guess = zb - max(1, round(1.5 * spt))
+            guess = zb - max(1, round(0.5 * spt))
             self.fw_z_offset = guess - value
             self.probe_log.append(f"probe reference: machine counter {value}, PC Z {guess}")
             z_touch = guess
         else:
             z_touch = value + self.fw_z_offset
             z_touch += round((zb - z_touch) / 65536) * 65536  # 16-bit wrap
-            if not (zb - 3 * spt - 2 <= z_touch <= zb + 2):
+            if not (zb - spt - 2 <= z_touch <= zb + 2):
                 self.probe_log.append(f"⚠ probe value {value} does not match PC Z {zb}")
                 raise ProbeError(
                     "The machine's probe value does not match the expected height "
-                    f"(counter {value}, PC expects {zb - 3 * spt}…{zb}). Position may be "
+                    f"(counter {value}, PC expects {zb - spt}…{zb}). Position may be "
                     "wrong - re-zero Z before cutting.")
         self.link.set_position(x, y, z_touch)
         self.link.position_valid = was_valid
@@ -333,7 +335,7 @@ class MachineController:
 
     def run_autolevel(self, hm: HeightMap, *, clearance_mm: float = 1.0,
                       first_travel_mm: float = 5.0, extra_travel_mm: float = 1.0,
-                      probe_spt: int = 3, stop: threading.Event | None = None,
+                      probe_spt: int = 14, stop: threading.Event | None = None,
                       on_point: Callable[[int, int, float], None] | None = None) -> HeightMap:
         """Probe every grid point (work X/Y) and fill hm.z (mm, first point = 0).
 

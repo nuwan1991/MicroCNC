@@ -85,9 +85,11 @@ class AutoLevelPanel(QWidget):
         self.first_mm = _dspin(0.5, 40, 5.0, 1, 0.5)
         self.speed = QSpinBox()
         self.speed.setRange(1, 14)
-        self.speed.setValue(3)
+        self.speed.setValue(14)
         self.speed.setSuffix(" steps/tick")
-        self.speed.setToolTip("Z speed while probing. The original Wegstr software probes at 14.")
+        self.speed.setToolTip("Z steps per probe move (one move per packet, ≈57 mm/min at 14).
+"
+                              "Your machine does not report touches at 3; the original uses 14.")
         f2.addRow("Spacing", self.spacing)
         f2.addRow("Margin", self.margin)
         f2.addRow("Clearance between points", self.clear_mm)
