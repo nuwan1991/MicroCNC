@@ -28,6 +28,7 @@ class SimMachine:
         self.overload = False
         self.silent = False  # simulate power cut: no replies at all
         self.contact = False    # touch test: clip touching the tool
+        self.latched = False    # touch reported; Z- refused until a Z+ move
         self.probe_z = probe_z  # Z step position where the probe touches
         # surface(x_steps, y_steps) -> z_steps of the board surface; overrides probe_z
         self.surface = surface
@@ -117,13 +118,20 @@ class SimMachine:
             if self.released or self.overload:
                 return self._status(), 0.009
             header, ticks = decode_packet(data)
-            if header == HEADER_JOG and self.contact:
-                # clip held against the tool by hand (touch test)
-                v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
-                return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.009
             surf = self._surface_z() if header == HEADER_JOG else None
             for t in ticks:
                 self.spindle = t.spindle
+                if t.z > 0:
+                    self.latched = False      # any Z up clears the touch latch
+                elif t.z < 0 and self.latched:
+                    # after a touch the firmware refuses Z- until Z moves up
+                    # (hardware 2026-11-14: Test touch, then Probe here failed)
+                    t = type(t)(t.x, t.y, 0, t.spindle)
+                elif t.z < 0 and header == HEADER_JOG and self.contact:
+                    # clip held against the tool by hand: reported on a Z- move
+                    self.latched = True
+                    v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                    return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.009
                 if surf is not None and t.z < 0 and self.pos[2] <= surf:
                     # already touching: firmware does not move further down (capture 1)
                     t = type(t)(t.x, t.y, 0, t.spindle)
@@ -131,6 +139,7 @@ class SimMachine:
                     self.pos[2] += 1 if t.z > 0 else -1
                     if surf is not None and t.z < 0 and self.pos[2] <= surf:
                         self.probe_count += 1
+                        self.latched = True
                         v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
                         return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
                 self.pos[0] += t.x

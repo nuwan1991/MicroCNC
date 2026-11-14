@@ -47,6 +47,7 @@ class MachineController:
         # probing (Stage 2.4)
         self._probe_wait: threading.Event | None = None
         self._touch_test_valid: bool | None = None   # set while a touch-test wiggle is out
+        self._touch_latched = False   # machine refuses Z- after a touch until Z moves up
         self._probe_value: int | None = None
         self.last_probe_value: int | None = None
         self.fw_z_offset: int | None = None   # PC Z steps - machine Z counter
@@ -64,6 +65,8 @@ class MachineController:
             pass
 
     def _on_link_event(self, ev: str, payload: object) -> None:
+        if ev == EV_PROBE:
+            self._touch_latched = True
         if ev == EV_PROBE and self._touch_test_valid is not None:
             # touch-test wiggle (Z +14, Z -14): the up tick ran, the down tick
             # was cut short somewhere - assume half of it (+-0.028 mm)
@@ -225,6 +228,8 @@ class MachineController:
                       self.settings.max_steps_per_tick)
             sp = self.link.spindle
             self.link.send(pack(jog_ticks(axis, delta, spt, sp), spindle=sp))
+            if axis == "z" and delta > 0:
+                self._touch_latched = False
         return delta * self.mmps(i)
 
     def jog_continuous(self, axis: str, direction: int, steps_per_tick: int | None = None) -> None:
@@ -289,6 +294,24 @@ class MachineController:
         self.link.send([encode_packet([Tick(z=14), Tick(z=-14), Tick()], HEADER_JOG)])
         return True
 
+    def _unlatch_touch(self) -> None:
+        """After a touch the machine refuses Z- until Z moves up: lift 14 steps
+        (0.056 mm) and come back. A touch reported here means the clip is still
+        touching the tool."""
+        self._probe_value = None
+        self._probe_wait = threading.Event()
+        try:
+            self.link.send([encode_packet([Tick(z=14), Tick(z=-14), Tick()], HEADER_JOG)])
+            if not self.link.wait_idle(2):
+                raise RuntimeError("machine did not answer")
+            touched = self._probe_wait.wait(0.05)
+        finally:
+            self._probe_wait = None
+        if touched:
+            raise ProbeError("The probe still reports contact - is the clip touching the "
+                             "tool or is the tool resting on the copper? Lift Z and try again.")
+        self._touch_latched = False
+
     def end_touch_test(self) -> None:
         self._touch_test_valid = None
 
@@ -312,6 +335,8 @@ class MachineController:
             raise RuntimeError("machine is moving")
         if self.link.spindle:
             raise RuntimeError("switch the spindle off before probing")
+        if self._touch_latched:
+            self._unlatch_touch()
         was_valid = self.link.position_valid
         mz = self.mmps(2)
         spt = max(1, min(int(steps_per_tick), self.settings.max_steps_per_tick))

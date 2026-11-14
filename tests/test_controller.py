@@ -116,3 +116,36 @@ def test_touch_check_wiggle_reports_contact():
         c.end_touch_test()
     finally:
         c.disconnect()
+
+
+def test_probe_after_touch_test_unlatches_first():
+    """Hardware 2026-11-14: after Test touch the machine refuses Z- until Z moves
+    up, so Probe here failed with 'no touch'. The probe now lifts 14 steps first."""
+    import time as _t
+    from micropcb.controller import MachineController, ProbeError
+    from micropcb.settings import MachineState, Settings
+    from micropcb.sim_machine import SimMachine
+    import pytest
+    c = MachineController(Settings(), MachineState(), persist=False)
+    sim = SimMachine(realtime=False, surface=lambda x, y: -300)   # copper 1.2 mm below
+    c.connect(transport=sim)
+    try:
+        c.zero_axes()
+        sim.contact = True
+        assert c.touch_check() and c.link.wait_idle(2)
+        _t.sleep(0.05)
+        sim.contact = False
+        assert sim.latched                      # machine now refuses Z-
+        z = c.probe(5.0)                        # must still find the copper
+        assert sim.probe_count == 1 and z == pytest.approx(-1.2, abs=0.06)
+        # clip still touching the tool -> clear message instead of a silent miss
+        c.jog("z", 1.0)
+        assert c.link.wait_idle(2)
+        c.touch_check() and c.link.wait_idle(2)
+        sim.contact = True
+        assert c.touch_check() and c.link.wait_idle(2)
+        _t.sleep(0.05)
+        with pytest.raises(ProbeError, match="still reports contact"):
+            c.probe(5.0)
+    finally:
+        c.disconnect()

@@ -232,3 +232,7 @@ spindle on/off → small G-code job → probe touch → press E-stop.
   user touched the clip to the tool repeatedly — no `04`. The original probes at Z −14 per tick
   and every touch is reported. MicroPCB now probes at 14 steps/tick, one moving tick per packet.
   Lowest speed that still reports a touch: not yet known.
+- **Touch latch (hardware 2026-11-14):** after a touch has been reported, the machine refuses
+  Z− moves (answers `01`, does not move) until Z moves up once. Test touch followed by Probe here
+  therefore failed until the user jogged Z up. MicroPCB now lifts 14 steps and comes back before
+  probing whenever the last event was a touch.
