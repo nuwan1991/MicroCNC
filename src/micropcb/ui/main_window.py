@@ -651,7 +651,8 @@ class MainWindow(QMainWindow):
         self.issues = check_program(
             self.tp, max_depth_mm=self.settings.check_max_depth_mm,
             max_feed_mm_min=self.ctl.make_planner(prog).max_feed_mm_min,
-            area=self._area_lohi())
+            area=self._area_lohi(),
+            surface=self._check_surface())
         if hasattr(self, "camera"):   # Stage 4.4 obstacles
             self.issues += self.camera.obstacle_issues(self.tp)
             self.issues.sort(key=lambda i: (i.line, i.severity != ERROR))
@@ -672,6 +673,11 @@ class MainWindow(QMainWindow):
             v.set_marker(None)
         self._show_job_info()
         self._sync_views()
+
+    def _check_surface(self):
+        """Copper height for the checks when the height map is applied to the job."""
+        hm = self.al.active_map() if hasattr(self, "al") else None
+        return hm.at if hm is not None else None
 
     def _fill_checks(self) -> None:
         self.checks_list.clear()

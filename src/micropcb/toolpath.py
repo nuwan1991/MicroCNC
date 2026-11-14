@@ -143,8 +143,9 @@ class Issue:
 def check_program(tp: Toolpath, *, max_depth_mm: float = 2.0,
                   max_feed_mm_min: float | None = None,
                   area: tuple[np.ndarray, np.ndarray] | None = None,
-                  limit: int = 300) -> list[Issue]:
-    """Look for likely mistakes. Surface is assumed at work Z = 0.
+                  limit: int = 300, surface=None) -> list[Issue]:
+    """Look for likely mistakes. Surface is at work Z = 0, or at surface(x, y)
+    when a height map is applied (depths are then measured from the copper).
 
     area: (min, max) allowed work coordinates (from the machine work area),
     or None if machine home is not set.
@@ -164,14 +165,19 @@ def check_program(tp: Toolpath, *, max_depth_mm: float = 2.0,
                 return
             issues.append(Issue(sev, ln, text))
 
-    zmin_seg = np.minimum(tp.start[:, 2], tp.end[:, 2])
+    zs, ze = tp.start[:, 2], tp.end[:, 2]
+    if surface is not None:      # depth below the measured copper, not below Z 0
+        surf = np.vectorize(surface, otypes=[float])
+        zs = zs - surf(tp.start[:, 0], tp.start[:, 1])
+        ze = ze - surf(tp.end[:, 0], tp.end[:, 1])
+    zmin_seg = np.minimum(zs, ze)
     xy_move = np.hypot(*(tp.end[:, :2] - tp.start[:, :2]).T) > 1e-6
     plunge = tp.end[:, 2] < tp.start[:, 2] - 1e-9
 
     # rapid below the surface
     bad = np.nonzero(tp.rapid & (zmin_seg < -1e-6) & xy_move)[0]
     add(ERROR, bad, "Rapid (G0) sideways move below the surface - tool may break")
-    bad = np.nonzero(tp.rapid & ~xy_move & plunge & (tp.end[:, 2] < -1e-6))[0]
+    bad = np.nonzero(tp.rapid & ~xy_move & plunge & (ze < -1e-6))[0]
     add(ERROR, bad, "Rapid (G0) plunge into the material")
     # cutting with spindle off
     bad = np.nonzero(~tp.rapid & (zmin_seg < -1e-6) & ~tp.spindle)[0]

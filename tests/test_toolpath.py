@@ -82,3 +82,20 @@ def test_checks_clean_file_and_area():
     area = (np.array([0, 0, -40.0]), np.array([10, 200, 5.0]))
     out = check_program(tp, max_feed_mm_min=170, area=area)
     assert out and all(i.text.startswith("Outside") for i in out)
+
+
+def test_checks_measure_depth_from_height_map_surface():
+    """With a height map applied, G0 Z0 over a low spot is ON the copper, not in it."""
+    from micropcb.autolevel import HeightMap, apply_heightmap
+    import numpy as np
+    hm = HeightMap(np.array([0.0, 20.0]), np.array([0.0, 20.0]),
+                   np.array([[-0.05, -0.05], [-0.05, -0.05]]))
+    prog = apply_heightmap(parse("G0 Z1\nG0 X5 Y5\nG0 Z0\nM3\nG1 Z-0.08 F50\nG1 X10\nG0 Z1\n"), hm)
+    tp = Toolpath(prog)
+    flat = [i.text for i in check_program(tp)]
+    assert any("plunge" in t for t in flat)            # old behaviour: false alarm
+    fixed = check_program(tp, surface=hm.at)
+    assert not [i for i in fixed if i.severity == ERROR], fixed
+    # a real rapid into the copper is still caught
+    bad = apply_heightmap(parse("G0 Z1\nG0 X5 Y5\nG0 Z-0.2\n"), hm)
+    assert any("plunge" in i.text for i in check_program(Toolpath(bad), surface=hm.at))
