@@ -38,7 +38,7 @@ def poly_path(geom) -> QPainterPath:
 class PcbView(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(300, 250)
+        self.setMinimumSize(300, 140)
         self.setMouseTracking(True)
         self.board: PlacedBoard | None = None
         self.visible: dict[str, bool] = {}

@@ -35,7 +35,7 @@ class PreviewWidget(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(300, 250)
+        self.setMinimumSize(300, 140)
         self.setMouseTracking(True)
         self.tp: Toolpath | None = None
         self._deep = QPainterPath()

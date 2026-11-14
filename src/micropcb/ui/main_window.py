@@ -101,6 +101,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(6, 4, 6, 2)
+        root.setSpacing(4)
 
         # --- top bar
         top = QHBoxLayout()
@@ -114,10 +116,10 @@ class MainWindow(QMainWindow):
         self.connect_btn.clicked.connect(self.toggle_connect)
         self.status_lbl = QLabel()
         self.status_lbl.setStyleSheet("font-weight: bold; padding: 0 10px;")
-        self.estop_btn = QPushButton("E-STOP\n(Esc)")
-        self.estop_btn.setMinimumSize(130, 56)
+        self.estop_btn = QPushButton("E-STOP  (Esc)")
+        self.estop_btn.setMinimumSize(150, 34)
         self.estop_btn.setStyleSheet(
-            "QPushButton { background:#c62828; color:white; font-size:16px;"
+            "QPushButton { background:#c62828; color:white; font-size:15px;"
             " font-weight:bold; border-radius:6px; }"
             "QPushButton:pressed { background:#8e0000; }")
         self.estop_btn.setToolTip("Stop all motion and switch spindle off.\n"
@@ -132,7 +134,7 @@ class MainWindow(QMainWindow):
         # --- warning banner
         self.banner = QLabel()
         self.banner.setWordWrap(True)
-        self.banner.setStyleSheet("background:#ffb300; color:black; padding:8px;"
+        self.banner.setStyleSheet("background:#ffb300; color:black; padding:4px 8px;"
                                   " font-weight:bold; border-radius:4px;")
         self.banner.hide()
         root.addWidget(self.banner)
@@ -275,11 +277,15 @@ class MainWindow(QMainWindow):
         crow.addWidget(clear)
         cl.addLayout(crow)
         right = QSplitter(Qt.Vertical)
+        right.setChildrenCollapsible(False)
+        self.vsplit = right
         self.view_tabs = QTabWidget()
         self.preview = PreviewWidget()
         self.preview.lineClicked.connect(self.select_line)
         self.view_tabs.addTab(self.preview, "2D")
         self.view_tabs.currentChanged.connect(lambda _: self._sync_views())
+        self.view_tabs.currentChanged.connect(
+            lambda _: self._bottom_fitted and self._fit_bottom())
         right.addWidget(self.view_tabs)
         right.addWidget(self._build_job_panel())
         self.bottom_tabs = QTabWidget()
@@ -313,18 +319,28 @@ class MainWindow(QMainWindow):
         right.addWidget(self.bottom_tabs)
         right.setStretchFactor(0, 5)
         right.setStretchFactor(1, 0)
-        right.setStretchFactor(2, 2)
+        right.setStretchFactor(2, 1)
+        self.bottom_tabs.currentChanged.connect(lambda _: self._fit_bottom())
+        self._bottom_fitted = False
         body.addWidget(right, 1)
         self._apply_quality()
         self.view_tabs.addTab(self.pcb_view, "PCB")
+        # camera: picture with its controls in a side column (fits small screens)
         self.camera_view = CameraView()
-        self.view_tabs.addTab(self.camera_view, "Camera")
         self.camera = CameraPanel(self, self.camera_view)
         camera_scroll = QScrollArea()
         camera_scroll.setWidget(self.camera)
         camera_scroll.setWidgetResizable(True)
-        camera_scroll.setFrameShape(QScrollArea.NoFrame)
-        self.bottom_tabs.addTab(camera_scroll, "Camera")
+        camera_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        camera_scroll.setMinimumWidth(self.camera.sizeHint().width() + 18)
+        cam_split = QSplitter(Qt.Horizontal)
+        cam_split.addWidget(self.camera_view)
+        cam_split.addWidget(camera_scroll)
+        cam_split.setStretchFactor(0, 1)
+        cam_split.setStretchFactor(1, 0)
+        cam_split.setChildrenCollapsible(False)
+        self.camera_page = cam_split
+        self.view_tabs.addTab(cam_split, "Camera")
 
         self.home_lbl = QLabel()
         self.statusBar().addPermanentWidget(self.home_lbl)
@@ -334,6 +350,8 @@ class MainWindow(QMainWindow):
     def _build_job_panel(self) -> QWidget:
         box = QGroupBox("Job")
         v = QVBoxLayout(box)
+        v.setContentsMargins(6, 2, 6, 4)
+        v.setSpacing(3)
         row = QHBoxLayout()
         self.open_btn = QPushButton("Open…")
         self.open_btn.clicked.connect(self.open_job)
@@ -344,24 +362,23 @@ class MainWindow(QMainWindow):
         self.stopjob_btn = QPushButton("■ Stop")
         self.stopjob_btn.clicked.connect(lambda: self._do(self.ctl.stop_job))
         for b in (self.open_btn, self.run_btn, self.pause_btn, self.stopjob_btn):
-            b.setMinimumHeight(36)
+            b.setMinimumHeight(30)
             b.setFocusPolicy(Qt.NoFocus)
             row.addWidget(b)
         self.run_btn.setStyleSheet("font-weight:bold;")
-        row.addStretch(1)
+        self.job_bar = QProgressBar()
+        self.job_bar.setRange(0, 1000)
+        self.job_bar.setTextVisible(False)
+        self.job_bar.setMaximumHeight(14)
+        self.job_status = QLabel()
+        self.job_status.setMinimumWidth(260)
+        row.addSpacing(8)
+        row.addWidget(self.job_bar, 1)
+        row.addWidget(self.job_status)
         v.addLayout(row)
         self.job_info = QLabel("No file loaded")
         self.job_info.setWordWrap(True)
         v.addWidget(self.job_info)
-        prow = QHBoxLayout()
-        self.job_bar = QProgressBar()
-        self.job_bar.setRange(0, 1000)
-        self.job_bar.setTextVisible(False)
-        self.job_status = QLabel()
-        self.job_status.setMinimumWidth(330)
-        prow.addWidget(self.job_bar, 1)
-        prow.addWidget(self.job_status)
-        v.addLayout(prow)
 
         # playback (simulation of the job in the views, no machine motion)
         pb = QHBoxLayout()
@@ -396,6 +413,36 @@ class MainWindow(QMainWindow):
         v.addLayout(pb)
         self.play_timer = QTimer(self, interval=30, timeout=self._play_step)
         return box
+
+    # ---------------------------------------------------------------- layout
+    def _fit_bottom(self) -> None:
+        """Give the bottom panel the height its current tab needs (max 60 %).
+
+        Console / G-code / Checks stay small so the views get the space;
+        Auto-level, PCB, CAM and Camera grow so their controls are not cut off.
+        """
+        sizes = self.vsplit.sizes()
+        total = sum(sizes)
+        if total <= 0:
+            return
+        w = self.bottom_tabs.currentWidget()
+        inner = w.widget() if isinstance(w, QScrollArea) else None
+        bar = self.bottom_tabs.tabBar().sizeHint().height()
+        if inner is not None:
+            need = max(inner.sizeHint().height(), inner.minimumSizeHint().height()) + bar + 12
+        else:
+            need = 190
+        bottom = max(150, min(need, int(total * 0.6)))
+        if self.view_tabs.currentWidget() is getattr(self, "camera_page", None):
+            bottom = 150          # camera picture + its side column get the room
+        job = sizes[1]
+        self.vsplit.setSizes([max(150, total - job - bottom), job, bottom])
+
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        if not self._bottom_fitted:
+            self._bottom_fitted = True
+            QTimer.singleShot(0, self._fit_bottom)
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu("&File")

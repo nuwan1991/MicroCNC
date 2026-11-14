@@ -13,7 +13,7 @@ class CameraView(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(320, 240)
+        self.setMinimumSize(320, 160)
         self.setMouseTracking(True)
         self.image: QImage | None = None
         self._buf = None
@@ -68,8 +68,8 @@ class CameraView(QWidget):
         p.fillRect(self.rect(), QColor("#202326"))
         if self.image is None:
             p.setPen(QColor("#9aa0a6"))
-            p.drawText(self.rect(), Qt.AlignCenter, "Camera off - choose a camera in the "
-                                                    "Camera tab below and press Start")
+            p.drawText(self.rect(), Qt.AlignCenter, "Camera off - choose a camera on the right "
+                                                    "and press Start")
             return
         s = self._scale()
         c = self._c()

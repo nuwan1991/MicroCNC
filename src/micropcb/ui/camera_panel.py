@@ -63,11 +63,15 @@ class CameraPanel(QWidget):
         self._last_id = -1
         self._load_config()
 
-        root = QHBoxLayout(self)
-        root.addWidget(self._build_camera(), 2)
-        root.addWidget(self._build_calib(), 3)
-        root.addWidget(self._build_align(), 3)
-        root.addWidget(self._build_obstacles(), 2)
+        root = QVBoxLayout(self)          # one column beside the camera picture
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(6)
+        root.addWidget(self._build_camera())
+        root.addWidget(self._build_calib())
+        root.addWidget(self._build_align())
+        root.addWidget(self._build_obstacles())
+        root.addStretch(1)
+        self.setMaximumWidth(380)
 
         view.clicked.connect(self._view_clicked)
         view.rectDrawn.connect(self._rect_drawn)
@@ -82,6 +86,7 @@ class CameraPanel(QWidget):
     def _build_camera(self) -> QGroupBox:
         g = QGroupBox("Camera")
         v = QVBoxLayout(g)
+        v.setSpacing(3)
         self.cam_combo = QComboBox()
         h = QHBoxLayout()
         h.addWidget(self.cam_combo, 1)
@@ -91,9 +96,11 @@ class CameraPanel(QWidget):
         for w, hh in RESOLUTIONS:
             self.res_combo.addItem(f"{w} × {hh}", (w, hh))
         self.res_combo.setCurrentIndex(1)
-        v.addWidget(self.res_combo)
         self.start_btn = _btn("Start", self.toggle_camera, checkable=True)
-        v.addWidget(self.start_btn)
+        rh = QHBoxLayout()
+        rh.addWidget(self.res_combo, 1)
+        rh.addWidget(self.start_btn)
+        v.addLayout(rh)
         self.driver_btn = _btn("Driver settings…", self._driver,
                                "Camera's own settings window (focus, exposure, white balance)")
         v.addWidget(self.driver_btn)
@@ -104,17 +111,23 @@ class CameraPanel(QWidget):
         self.focus.setRange(0, 255)
         self.focus.valueChanged.connect(lambda x: self.camera and self.camera.set("focus", x))
         self.focus_lbl = QLabel("Focus")
-        v.addWidget(self.focus_lbl)
-        v.addWidget(self.focus)
+        fh = QHBoxLayout()
+        fh.addWidget(self.focus_lbl)
+        fh.addWidget(self.focus, 1)
+        v.addLayout(fh)
         v.addWidget(QLabel("Show on picture:"))
         self.show = {}
-        for key, text in (("pcb", "PCB"), ("path", "Toolpath"), ("tool", "Tool position"),
-                          ("obst", "Obstacles"), ("grid", "10 mm grid")):
+        sg = QGridLayout()
+        sg.setVerticalSpacing(2)
+        for k, (key, text) in enumerate((("pcb", "PCB"), ("path", "Toolpath"),
+                                         ("tool", "Tool"), ("obst", "Obstacles"),
+                                         ("grid", "10 mm grid"))):
             c = QCheckBox(text)
             c.setChecked(key != "grid")
             c.toggled.connect(lambda _: self._update_overlay())
             self.show[key] = c
-            v.addWidget(c)
+            sg.addWidget(c, k // 2, k % 2)
+        v.addLayout(sg)
         v.addStretch(1)
         self._camera_controls()
         return g
@@ -296,7 +309,7 @@ class CameraPanel(QWidget):
             return
         self.camera = cam
         self.start_btn.setText("Stop")
-        self.win.view_tabs.setCurrentWidget(self.view)
+        self.win.view_tabs.setCurrentWidget(getattr(self.win, "camera_page", self.view))
         self._camera_controls()
         self.win.log(f"Camera started: {info.name}")
 
@@ -307,8 +320,9 @@ class CameraPanel(QWidget):
         has_focus = real and cam.supports("focus")
         self.focus.setEnabled(has_focus)
         self.autofocus.setEnabled(has_focus)
-        self.focus_lbl.setText("Focus" if has_focus or not real else "Focus (fixed - not "
-                                                                    "adjustable on this camera)")
+        self.focus_lbl.setText("Focus" if has_focus or not real else "Focus (fixed)")
+        self.focus_lbl.setToolTip("" if has_focus or not real else
+                                  "Focus is not adjustable on this camera")
         if has_focus:
             self.focus.blockSignals(True)
             self.focus.setValue(int(cam.get("focus")))
@@ -394,7 +408,7 @@ class CameraPanel(QWidget):
         if on and mode in ("align",) and not self.calib().ok:
             self.win.log("⚠ calibrate the camera first")
         if on:
-            self.win.view_tabs.setCurrentWidget(self.view)
+            self.win.view_tabs.setCurrentWidget(getattr(self.win, "camera_page", self.view))
         self._hint()
 
     def _hint(self) -> None:
