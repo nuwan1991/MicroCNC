@@ -323,8 +323,18 @@ class MachineController:
     def end_touch_test(self) -> None:
         self._touch_test_valid = None
 
+    probing = False   # True while a probe cycle runs (position briefly unknown)
+
     def probe(self, max_travel_mm: float, steps_per_tick: int = 14,
               stop: threading.Event | None = None) -> float:
+        self.probing = True
+        try:
+            return self._probe(max_travel_mm, steps_per_tick, stop)
+        finally:
+            self.probing = False
+
+    def _probe(self, max_travel_mm: float, steps_per_tick: int = 14,
+               stop: threading.Event | None = None) -> float:
         """Move Z down until the tool touches the copper (clip on the board).
 
         Returns the work Z (mm) of the touch and leaves the tool there; the

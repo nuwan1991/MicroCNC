@@ -1056,7 +1056,9 @@ class MainWindow(QMainWindow):
         c = self.ctl
         con = c.connected
         rel = con and c.link.released
-        valid = c.position_valid
+        # during a probe the link marks the position unknown until the machine's
+        # counter arrives - don't flash the warning for that
+        valid = c.position_valid or c.probing or (hasattr(self, "al") and self.al.running)
         self.connect_btn.setText("Disconnect" if con else "Connect")
         self.port_box.setEnabled(not con)
 
