@@ -760,6 +760,10 @@ class MainWindow(QMainWindow):
             msg += "\nSoft limits are OFF (machine home not set) - bounds are not checked."
         if prog.uses_spindle:
             msg += "\nThe spindle will switch on. Keep hands clear."
+        if self.ctl.probed_since_job:
+            msg += ("\n\n⚠ REMOVE THE PROBE CLIP from the board first. While the clip is on,\n"
+                    "the machine stops going down as soon as the tool touches the copper,\n"
+                    "so the job would only scratch the surface.")
         if QMessageBox.question(self, "Run job", msg) != QMessageBox.Yes:
             return
         try:

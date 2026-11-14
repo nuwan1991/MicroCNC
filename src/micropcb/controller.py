@@ -48,6 +48,7 @@ class MachineController:
         self._probe_wait: threading.Event | None = None
         self._touch_test_valid: bool | None = None   # set while a touch-test wiggle is out
         self._touch_latched = False   # machine refuses Z- after a touch until Z moves up
+        self.probed_since_job = False
         self._probe_value: int | None = None
         self.last_probe_value: int | None = None
         self.fw_z_offset: int | None = None   # PC Z steps - machine Z counter
@@ -67,6 +68,7 @@ class MachineController:
     def _on_link_event(self, ev: str, payload: object) -> None:
         if ev == EV_PROBE:
             self._touch_latched = True
+            self.probed_since_job = True     # reminder: remove the clip before cutting
         if ev == EV_PROBE and self._touch_test_valid is not None:
             # touch-test wiggle (Z +14, Z -14): the up tick ran, the down tick
             # was cut short somewhere - assume half of it (+-0.028 mm)
@@ -511,6 +513,7 @@ class MachineController:
         if self.job_active:
             raise RuntimeError("a job is already active")
         self._require_ready()
+        self.probed_since_job = False
         if self.busy():
             raise RuntimeError("machine is moving - wait until it is idle")
         if not self.position_valid:
