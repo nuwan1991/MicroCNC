@@ -514,10 +514,10 @@ class MainWindow(QMainWindow):
         m.addAction(a)
 
     # ================================================================ actions
-    def log(self, text: str) -> None:
+    def log(self, text: str, record: bool = True) -> None:
         self.console.appendPlainText(time.strftime("%H:%M:%S ") + text)
         rec = getattr(self, "recorder", None)
-        if rec is not None:     # MicroPCB's actions go into the capture as notes
+        if rec is not None and record:   # MicroPCB's actions go into the capture as notes
             rec.record("EV", b"", text)
 
     # ---------------------------------------------------------------- recording
@@ -1079,7 +1079,7 @@ class MainWindow(QMainWindow):
                 if d == "tx":
                     self._last_ka = len(b) == 2
                 if not is_ka or self.show_keepalive.isChecked():
-                    self.log(f"{d} {b.hex(' ')}")
+                    self.log(f"{d} {b.hex(' ')}", record=False)   # packets are recorded anyway
             return
         if ev == EV_CONNECTED:
             self.log(f"Connected ({self.ctl.port})")

@@ -171,10 +171,22 @@ def report(meta: list[str], rows: list[Row], mmps: float = MM_PER_STEP) -> str:
     out.append("")
     out.append("Things to look at:")
     found = False
+    shown = 0
     for r in rows:
-        if r.kind in ("overload", "released", "raw") or r.dir == "EV":
-            out.append(f"  {r.t:10.3f} s  {r.dir} {r.kind} {r.hex} {r.note}")
+        warn = r.dir == "EV" and ("⚠" in r.note or "incomplete" in r.note)
+        if r.kind in ("overload", "released", "raw") or warn:
+            if shown < 40:
+                out.append(f"  {r.t:10.3f} s  {r.dir} {r.kind} {r.hex} {r.note}")
+            shown += 1
             found = True
+    if shown > 40:
+        out.append(f"  … {shown - 40} more")
+    notes = [r for r in rows if r.dir == "EV" and r.note
+             and not r.note.startswith(("tx ", "rx "))]
+    if notes:
+        out.append("")
+        out.append(f"MicroPCB / bridge notes ({len(notes)}, first 200):")
+        out += [f"  {r.t:10.3f} s  {r.note}" for r in notes[:200]]
     gaps = [(rows[k].t - rows[k - 1].t, rows[k - 1].t) for k in range(1, len(rows))]
     long = sorted([g for g in gaps if g[0] > 0.5], reverse=True)[:10]
     for g, t in long:

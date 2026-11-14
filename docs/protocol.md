@@ -236,3 +236,9 @@ spindle on/off → small G-code job → probe touch → press E-stop.
   Z− moves (answers `01`, does not move) until Z moves up once. Test touch followed by Probe here
   therefore failed until the user jogged Z up. MicroPCB now lifts 14 steps and comes back before
   probing whenever the last event was a touch.
+- **Late touch report (MicroPCB recording 2026-11-14 22:32):** at the closing re-probe of an
+  auto-level grid the tool touched the copper after ~506 steps, but the machine kept answering
+  `01` to 13 more one-tick Z− packets (refusing them) and only then sent `04`. MicroPCB's counted
+  Z was 0.74 mm too deep; the machine counter was exact (16348 at the first point before and
+  after 70 probes). Rule: after a touch, the machine counter is the truth for Z; counted steps
+  around a touch are not. MicroPCB only refuses a counter that jumps > 5 mm (power cycle).

@@ -29,6 +29,8 @@ class SimMachine:
         self.silent = False  # simulate power cut: no replies at all
         self.contact = False    # touch test: clip touching the tool
         self.latched = False    # touch reported; Z- refused until a Z+ move
+        self.late_report = 0     # touch reported only after this many more Z- packets
+        self._late_left = None   # (hardware 2026-11-14: up to 13, answered 01 meanwhile)
         self.probe_z = probe_z  # Z step position where the probe touches
         # surface(x_steps, y_steps) -> z_steps of the board surface; overrides probe_z
         self.surface = surface
@@ -118,6 +120,14 @@ class SimMachine:
             if self.released or self.overload:
                 return self._status(), 0.009
             header, ticks = decode_packet(data)
+            if self._late_left is not None and any(t.z < 0 for t in ticks):
+                # touching, report still pending: refuse the move but answer OK
+                if self._late_left > 0:
+                    self._late_left -= 1
+                    return self._status(), 3 * TICK_SECONDS
+                self._late_left = None
+                v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
             surf = self._surface_z() if header == HEADER_JOG else None
             for t in ticks:
                 self.spindle = t.spindle
@@ -140,6 +150,9 @@ class SimMachine:
                     if surf is not None and t.z < 0 and self.pos[2] <= surf:
                         self.probe_count += 1
                         self.latched = True
+                        if self.late_report:
+                            self._late_left = self.late_report - 1
+                            return self._status(), 3 * TICK_SECONDS
                         v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
                         return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
                 self.pos[0] += t.x

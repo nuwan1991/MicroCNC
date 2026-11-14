@@ -400,21 +400,23 @@ class MachineController:
                 # The machine's counter is exact; our sent-step count is not
                 # (steps refused around a touch are still acknowledged). Trust
                 # the counter - unless it jumped so far that it was reset.
-                # Hardware 2026-11-14: counter and counted steps differ by up to
-                # ~0.14 mm per touch. Small differences: trust the counter and log
-                # it. Large ones mean the position is really unknown - never shift
-                # Z silently by that much (a 2 mm shift ruined a job).
+                # Hardware recordings 2026-11-14: the machine answers "OK" to Z-
+                # moves it refuses around a touch (up to 13 packets = 0.74 mm), so
+                # our counted Z is wrong while its counter is exact (the same spot
+                # gives the same counter after a whole grid). Trust the counter,
+                # like the original software. Only a huge jump means the counter
+                # was reset (machine switched off and on).
                 diff_mm = (z_touch - zb) * mz
                 self.probe_log.append(
                     f"probe: counter {value}, counted Z {zb}, counter says {z_touch} "
                     f"({diff_mm:+.3f} mm)")
-                if abs(diff_mm) > 0.2:
+                if abs(diff_mm) > 5.0:
                     self.fw_z_offset = None      # next touch takes a new reference
                     self.link.position_valid = False
                     raise ProbeError(
-                        f"Z position is off by {diff_mm:+.2f} mm compared with the machine's "
-                        "probe counter (steps lost or not executed). Jog up, do 'Probe + "
-                        "set Z 0' and run auto-level again.")
+                        f"The machine's probe counter jumped {diff_mm:+.2f} mm (was the machine "
+                        "switched off?). Jog up, do 'Probe + set Z 0' and run auto-level "
+                        "again.")
         self.link.set_position(x, y, z_touch)
         self.link.position_valid = was_valid
         self.save_state()

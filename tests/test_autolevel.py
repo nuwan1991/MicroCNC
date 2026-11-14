@@ -189,3 +189,22 @@ def test_autolevel_closing_reprobe_reports_drift():
         assert hm2.meta["drift_mm"] == pytest.approx(0.1, abs=0.06)
     finally:
         c.disconnect()
+
+
+def test_late_touch_report_trusts_machine_counter():
+    """Hardware 2026-11-14: the machine answered OK to 13 refused Z- packets and
+    reported the touch late. The counter is right; the closing check must read
+    ~0 drift and no error must be raised."""
+    c = _ctl(lambda x, y: -250)
+    try:
+        c.zero_axes()
+        hm = HeightMap.empty(*make_grid(0, 0, 10, 10, spacing=10))
+        c.sim.late_report = 13
+        c.run_autolevel(hm)
+        assert hm.complete
+        assert abs(hm.meta["drift_mm"]) <= 0.02
+        # work Z must equal the real height of the tool above the copper
+        real_mm = (c.sim.pos[2] - (-250)) * 0.004
+        assert c.work_mm()[2] == pytest.approx(real_mm, abs=0.06)
+    finally:
+        c.disconnect()
