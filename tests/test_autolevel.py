@@ -165,3 +165,27 @@ def test_autolevel_lifts_before_moving_to_first_point():
         assert min(xy_at_z) >= -250 + 250   # never sideways below copper + clearance
     finally:
         c.disconnect()
+
+
+def test_autolevel_closing_reprobe_reports_drift():
+    """After the grid the first point is probed again: 0 when nothing drifted,
+    the drift when Z moved (hardware 2026-11-14: ~2 mm error went unnoticed)."""
+    level = {"z": -250}
+    c = _ctl(lambda x, y: level["z"])
+    try:
+        c.zero_axes()
+        hm = HeightMap.empty(*make_grid(0, 0, 10, 10, spacing=10))
+        c.run_autolevel(hm)
+        assert hm.meta["drift_mm"] == pytest.approx(0, abs=0.0045)
+
+        hm2 = HeightMap.empty(*make_grid(0, 0, 10, 10, spacing=10))
+        n = {"k": 0}
+
+        def raise_board(i, j, z):           # board 0.1 mm higher after the last point
+            n["k"] += 1
+            if n["k"] == 4:
+                level["z"] = -225
+        c.run_autolevel(hm2, on_point=raise_board)
+        assert hm2.meta["drift_mm"] == pytest.approx(0.1, abs=0.06)
+    finally:
+        c.disconnect()

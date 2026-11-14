@@ -398,18 +398,21 @@ class MachineController:
                 # The machine's counter is exact; our sent-step count is not
                 # (steps refused around a touch are still acknowledged). Trust
                 # the counter - unless it jumped so far that it was reset.
+                # Hardware 2026-11-14: counter and counted steps differ by up to
+                # ~0.14 mm per touch. Small differences: trust the counter and log
+                # it. Large ones mean the position is really unknown - never shift
+                # Z silently by that much (a 2 mm shift ruined a job).
                 diff_mm = (z_touch - zb) * mz
-                if abs(diff_mm) <= 2.0:
-                    self.probe_log.append(
-                        f"Z corrected {diff_mm:+.3f} mm from the machine's counter "
-                        f"(counter {value}, counted Z {zb}, now {z_touch})")
-                else:
-                    guess = zb - max(1, round(0.5 * spt))
-                    self.fw_z_offset = guess - value
-                    self.probe_log.append(
-                        f"⚠ machine counter jumped {diff_mm:+.2f} mm (counter {value}, counted "
-                        f"Z {zb}) - new probe reference taken. Set Z zero again before cutting.")
-                    z_touch = guess
+                self.probe_log.append(
+                    f"probe: counter {value}, counted Z {zb}, counter says {z_touch} "
+                    f"({diff_mm:+.3f} mm)")
+                if abs(diff_mm) > 0.2:
+                    self.fw_z_offset = None      # next touch takes a new reference
+                    self.link.position_valid = False
+                    raise ProbeError(
+                        f"Z position is off by {diff_mm:+.2f} mm compared with the machine's "
+                        "probe counter (steps lost or not executed). Jog up, do 'Probe + "
+                        "set Z 0' and run auto-level again.")
         self.link.set_position(x, y, z_touch)
         self.link.position_valid = was_valid
         self.save_state()
@@ -469,7 +472,22 @@ class MachineController:
             self.wait_idle(30)
             if on_point is not None:
                 on_point(i, j, z)
+        # closing check: probe the first point again - it must still be Z 0.
+        # Catches lost / not executed Z steps during the grid (hardware 2026-11-14).
+        x, y = float(hm.xs[order[0][0]]), float(hm.ys[order[0][1]])
+        wx, wy, wz = self.work_mm()
+        if wz < top + clearance_mm:
+            self.jog("z", top + clearance_mm - wz)
+        self.jog("x", x - wx)
+        self.jog("y", y - wy)
+        if not self.wait_idle(120):
+            raise RuntimeError("move did not finish")
+        travel = self.work_mm()[2] - (np.nanmin(hm.z) - extra_travel_mm)
+        drift = self.probe(travel, probe_spt, stop)
+        self.jog("z", clearance_mm)
+        self.wait_idle(30)
         hm.meta.update({"points": hm.probed, "clearance_mm": clearance_mm,
+                        "drift_mm": round(float(drift), 4),
                         "time": time.strftime("%Y-%m-%d %H:%M:%S")})
         return hm
 

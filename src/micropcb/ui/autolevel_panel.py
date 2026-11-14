@@ -146,6 +146,8 @@ class AutoLevelPanel(QWidget):
             return self.hm
         return None
 
+    DRIFT_LIMIT = 0.03   # mm, closing re-probe of the first point
+
     def refresh(self) -> None:
         c = self.ctl
         ready = (c.connected and not c.link.released and not c.job_active
@@ -331,9 +333,20 @@ class AutoLevelPanel(QWidget):
             self._show_result()
             self.win.show_heightmap(self.hm)
         elif ev == "al_done":
-            self.win.log("Auto-level finished")
+            drift = float(self.hm.meta.get("drift_mm", 0.0))
+            self.win.log(f"Auto-level finished - first point re-probed: {drift:+.3f} mm")
             self._show_result()
-            self.apply_chk.setChecked(True)
+            if abs(drift) <= self.DRIFT_LIMIT:
+                self.apply_chk.setChecked(True)
+            else:
+                self.win.log("⚠ height map NOT applied: Z drifted during auto-level")
+                QMessageBox.warning(
+                    self, "Auto-level",
+                    f"The first point measured again at {drift:+.3f} mm instead of 0.\n\n"
+                    "Z position drifted during the grid (lost or not executed steps), so the "
+                    "height map and Z zero are not reliable and the map was NOT applied.\n\n"
+                    "Do 'Probe + set Z 0' and run auto-level again. If it happens again, "
+                    "record the run with the bridge and send it.")
             self.win.show_heightmap(self.hm)
         elif ev == "al_probe":
             z, value, zero = payload
