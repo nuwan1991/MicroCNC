@@ -140,3 +140,28 @@ def test_autolevel_cancel():
             c.run_autolevel(HeightMap.empty(*make_grid(0, 0, 10, 10, 10)), stop=stop)
     finally:
         c.disconnect()
+
+
+def test_autolevel_lifts_before_moving_to_first_point():
+    """Hardware 2026-11-14: the tool moved to the first grid point without lifting.
+    Every sideways move must happen with Z raised by the clearance."""
+    from micropcb.protocol import decode_packet
+    c = _ctl(lambda x, y: -250)            # copper 1 mm below the start
+    try:
+        c.zero_axes()
+        xy_at_z = []                       # machine Z when each XY packet arrives
+        orig = c.sim.write
+
+        def spy(data):
+            if len(data) == 7 and any(t.x or t.y for t in decode_packet(data)[1]):
+                xy_at_z.append(c.sim.pos[2])
+            return orig(data)
+
+        c.sim.write = spy
+        hm = HeightMap.empty(*make_grid(5, 5, 15, 15, spacing=10))
+        c.run_autolevel(hm, clearance_mm=1.0)
+        assert hm.complete and xy_at_z
+        assert xy_at_z[0] >= 250            # lifted 1 mm before the first XY move
+        assert min(xy_at_z) >= -250 + 250   # never sideways below copper + clearance
+    finally:
+        c.disconnect()

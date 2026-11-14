@@ -404,8 +404,10 @@ class MachineController:
                       on_point: Callable[[int, int, float], None] | None = None) -> HeightMap:
         """Probe every grid point (work X/Y) and fill hm.z (mm, first point = 0).
 
-        Start with the tool above the first point area, at most first_travel_mm
-        above the copper. Work Z 0 is set to the copper at the first point.
+        Start with the tool at most first_travel_mm above the copper. Z is lifted
+        by clearance_mm before EVERY sideways move, also the first one (the tool
+        may be resting just above the copper after Probe + set Z 0).
+        Work Z 0 is set to the copper at the first point.
         """
         if self.job_active:
             raise RuntimeError("stop the job before measuring a height map")
@@ -415,6 +417,7 @@ class MachineController:
         order = probe_order(len(hm.xs), len(hm.ys))
         hm.z[:] = float("nan")
         top = 0.0  # highest surface measured so far (work mm)
+        first_lift = 0.0
         for n, (i, j) in enumerate(order):
             if stop is not None and stop.is_set():
                 raise ProbeCancelled("auto-level cancelled")
@@ -424,6 +427,9 @@ class MachineController:
                 travel_z = top + clearance_mm
                 if wz < travel_z:
                     self.jog("z", travel_z - wz)
+            elif abs(x - wx) > 0.01 or abs(y - wy) > 0.01:
+                # copper height unknown yet: lift relative to where the tool is
+                first_lift = self.jog("z", clearance_mm)
             self.jog("x", x - wx)
             self.jog("y", y - wy)
             if not self.wait_idle(120):
@@ -433,7 +439,7 @@ class MachineController:
                 raise ProbeError(f"Probe point X {x:.2f} Y {y:.2f} is outside the work area "
                                  "(soft limits)")
             if n == 0:
-                z = self.probe(first_travel_mm, max(1, probe_spt - 1), stop)
+                z = self.probe(first_travel_mm + first_lift, max(1, probe_spt - 1), stop)
                 self.zero_axes("z")  # copper at the first point = work Z 0
                 z = 0.0
             else:
