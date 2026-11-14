@@ -90,8 +90,8 @@ def test_unclean_exit_marks_position_invalid():
     c.disconnect()
 
 
-def test_idle_touch_check_reports_contact_without_moving():
-    """Touch test: a zero-motion probe packet is answered with 04 while touching."""
+def test_touch_check_wiggle_reports_contact():
+    """Touch test: a tiny Z up/down wiggle is answered with 04 while touching."""
     import time as _t
     from micropcb.controller import MachineController
     from micropcb.protocol import HANDSHAKE
@@ -104,14 +104,15 @@ def test_idle_touch_check_reports_contact_without_moving():
     sim = SimMachine(realtime=False)
     c.connect(transport=sim)
     try:
-        c.link.send([HANDSHAKE])
-        assert c.link.wait_idle(2)
-        assert EV_PROBE not in events
-        sim.contact = True
-        c.link.send([HANDSHAKE])
-        assert c.link.wait_idle(2)
+        c.zero_axes()
+        assert c.touch_check() and c.link.wait_idle(2)
         _t.sleep(0.05)
-        assert EV_PROBE in events and c.link.position_valid and not c.link.last_probe_in_motion
-        assert sim.pos == [0, 0, 0]
+        assert EV_PROBE not in events and sim.pos == [0, 0, 0]   # net zero move
+        sim.contact = True
+        assert c.touch_check() and c.link.wait_idle(2)
+        _t.sleep(0.05)
+        assert EV_PROBE in events and c.link.position_valid
+        assert abs(c.link.position[2]) <= 14 and c.state.home_set == c.state.home_set
+        c.end_touch_test()
     finally:
         c.disconnect()

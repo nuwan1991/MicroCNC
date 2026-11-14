@@ -46,6 +46,7 @@ class MachineController:
         self.job: Job | None = None
         # probing (Stage 2.4)
         self._probe_wait: threading.Event | None = None
+        self._touch_test_valid: bool | None = None   # set while a touch-test wiggle is out
         self._probe_value: int | None = None
         self.last_probe_value: int | None = None
         self.fw_z_offset: int | None = None   # PC Z steps - machine Z counter
@@ -63,6 +64,16 @@ class MachineController:
             pass
 
     def _on_link_event(self, ev: str, payload: object) -> None:
+        if ev == EV_PROBE and self._touch_test_valid is not None:
+            # touch-test wiggle (Z +14, Z -14): the up tick ran, the down tick
+            # was cut short somewhere - assume half of it (+-0.028 mm)
+            x, y, z = self.link.position
+            self.link.set_position(x, y, z + 7)
+            self.link.position_valid = self._touch_test_valid
+            self._touch_test_valid = None
+            self.last_probe_value = payload
+            self._emit(ev, payload)
+            return
         if ev == EV_PROBE:
             self.last_probe_value = payload
             if self._probe_wait is not None:
@@ -263,6 +274,24 @@ class MachineController:
 
 
     # ------------------------------------------------------------ probing
+    def touch_check(self) -> bool:
+        """One touch-test wiggle: Z up 14 steps then down 14 (net 0, 0.056 mm).
+
+        The machine reports contact only while Z moves down fast enough (it
+        ignores a zero-motion packet), so a tiny real move is needed.
+        Returns False when it could not be sent (busy / not ready).
+        """
+        if not self.connected or self.link.released or self.job_active or self.busy():
+            return False
+        if self.link.spindle:
+            raise RuntimeError("switch the spindle off for the touch test")
+        self._touch_test_valid = self.link.position_valid
+        self.link.send([encode_packet([Tick(z=14), Tick(z=-14), Tick()], HEADER_JOG)])
+        return True
+
+    def end_touch_test(self) -> None:
+        self._touch_test_valid = None
+
     def probe(self, max_travel_mm: float, steps_per_tick: int = 14,
               stop: threading.Event | None = None) -> float:
         """Move Z down until the tool touches the copper (clip on the board).
@@ -277,6 +306,7 @@ class MachineController:
         two empty ones, so the step count of the packet that hit is uncertain by
         at most one tick (14 steps = 0.056 mm), not three.
         """
+        self._touch_test_valid = None
         self._require_ready()
         if self.busy():
             raise RuntimeError("machine is moving")

@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayo
 
 from ..autolevel import HeightMap, make_grid
 from ..controller import ProbeCancelled
-from ..protocol import HANDSHAKE
 
 
 def _dspin(lo, hi, val, dec=2, step=0.1, suffix=" mm") -> QDoubleSpinBox:
@@ -186,9 +185,9 @@ class AutoLevelPanel(QWidget):
     TOUCH_TEST_SECONDS = 20
 
     def _touch_toggled(self, on: bool) -> None:
-        """Wiring test. The machine reports contact as reply 04 to a packet; while
-        idle it is not reliable on the 1 s keep-alive alone, so a zero-motion
-        probe packet (3F 00 00 00 00 00 00) is sent ~7 times a second."""
+        """Wiring test. The machine reports contact (reply 04) only while Z moves
+        down fast; it ignores keep-alives and zero-motion packets (hardware test
+        2026-11-14). So the bit wiggles 0.056 mm up and down ~7 times a second."""
         self._touch_test = on
         if not hasattr(self, "_touch_timer"):
             self._touch_timer = QTimer(self, interval=150, timeout=self._touch_poll)
@@ -199,10 +198,11 @@ class AutoLevelPanel(QWidget):
                 return
             self._touch_until = time.monotonic() + self.TOUCH_TEST_SECONDS
             self._touch_polls = 0
-            self.probe_lbl.setText("Touch the clip to the tool now and hold it 1 s…")
+            self.probe_lbl.setText("The bit now wiggles 0.06 mm. Touch the clip to the tool and hold it 1 s…")
             self._touch_timer.start()
         else:
             self._touch_timer.stop()
+            self.ctl.end_touch_test()
             if self.probe_lbl.text().startswith("Touch the clip"):
                 self.probe_lbl.setText("")
 
@@ -222,13 +222,14 @@ class AutoLevelPanel(QWidget):
                 "clean. If it works in the Wegstr software, record both through the bridge.")
             self.win.log(f"Touch test: no 04 reply to {self._touch_polls} probe checks")
             return
-        if c.link.released or c.job_active or c.busy():
-            return
         try:
-            c.link.send([HANDSHAKE])
-            self._touch_polls += 1
-        except RuntimeError:
-            pass
+            if c.touch_check():
+                self._touch_polls += 1
+        except RuntimeError as e:
+            self._touch_test = False
+            self.touch_btn.setChecked(False)
+            self.probe_lbl.setText(str(e))
+            return
         self.probe_lbl.setText(f"Touch the clip to the tool now and hold it 1 s… "
                                f"({left:.0f} s)")
 
