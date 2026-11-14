@@ -322,11 +322,21 @@ class MachineController:
             z_touch = value + self.fw_z_offset
             z_touch += round((zb - z_touch) / 65536) * 65536  # 16-bit wrap
             if not (zb - spt - 2 <= z_touch <= zb + 2):
-                self.probe_log.append(f"⚠ probe value {value} does not match PC Z {zb}")
-                raise ProbeError(
-                    "The machine's probe value does not match the expected height "
-                    f"(counter {value}, PC expects {zb - spt}…{zb}). Position may be "
-                    "wrong - re-zero Z before cutting.")
+                # The machine's counter is exact; our sent-step count is not
+                # (steps refused around a touch are still acknowledged). Trust
+                # the counter - unless it jumped so far that it was reset.
+                diff_mm = (z_touch - zb) * mz
+                if abs(diff_mm) <= 2.0:
+                    self.probe_log.append(
+                        f"Z corrected {diff_mm:+.3f} mm from the machine's counter "
+                        f"(counter {value}, counted Z {zb}, now {z_touch})")
+                else:
+                    guess = zb - max(1, round(0.5 * spt))
+                    self.fw_z_offset = guess - value
+                    self.probe_log.append(
+                        f"⚠ machine counter jumped {diff_mm:+.2f} mm (counter {value}, counted "
+                        f"Z {zb}) - new probe reference taken. Set Z zero again before cutting.")
+                    z_touch = guess
         self.link.set_position(x, y, z_touch)
         self.link.position_valid = was_valid
         self.save_state()
