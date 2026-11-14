@@ -27,6 +27,7 @@ class SimMachine:
         self.released = False
         self.overload = False
         self.silent = False  # simulate power cut: no replies at all
+        self.contact = False    # touch test: clip touching the tool
         self.probe_z = probe_z  # Z step position where the probe touches
         # surface(x_steps, y_steps) -> z_steps of the board surface; overrides probe_z
         self.surface = surface
@@ -116,6 +117,10 @@ class SimMachine:
             if self.released or self.overload:
                 return self._status(), 0.009
             header, ticks = decode_packet(data)
+            if header == HEADER_JOG and self.contact:
+                # clip held against the tool by hand (touch test)
+                v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.009
             surf = self._surface_z() if header == HEADER_JOG else None
             for t in ticks:
                 self.spindle = t.spindle

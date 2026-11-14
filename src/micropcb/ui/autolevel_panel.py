@@ -8,13 +8,16 @@ from __future__ import annotations
 import json
 import threading
 
-from PySide6.QtCore import Qt
+import time
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..autolevel import HeightMap, make_grid
 from ..controller import ProbeCancelled
+from ..protocol import HANDSHAKE
 
 
 def _dspin(lo, hi, val, dec=2, step=0.1, suffix=" mm") -> QDoubleSpinBox:
@@ -178,14 +181,60 @@ class AutoLevelPanel(QWidget):
             w.setValue(v)
 
     # ------------------------------------------------------------ probe test
+    TOUCH_TEST_SECONDS = 20
+
     def _touch_toggled(self, on: bool) -> None:
+        """Wiring test. The machine reports contact as reply 04 to a packet; while
+        idle it is not reliable on the 1 s keep-alive alone, so a zero-motion
+        probe packet (3F 00 00 00 00 00 00) is sent ~7 times a second."""
         self._touch_test = on
-        self.probe_lbl.setText("Touch the clip to the tool now…" if on else "")
+        if not hasattr(self, "_touch_timer"):
+            self._touch_timer = QTimer(self, interval=150, timeout=self._touch_poll)
+        if on:
+            if not self.ctl.connected:
+                self.probe_lbl.setText("Connect to the machine first.")
+                self.touch_btn.setChecked(False)
+                return
+            self._touch_until = time.monotonic() + self.TOUCH_TEST_SECONDS
+            self._touch_polls = 0
+            self.probe_lbl.setText("Touch the clip to the tool now and hold it 1 s…")
+            self._touch_timer.start()
+        else:
+            self._touch_timer.stop()
+            if self.probe_lbl.text().startswith("Touch the clip"):
+                self.probe_lbl.setText("")
+
+    def _touch_poll(self) -> None:
+        c = self.ctl
+        if not self._touch_test or not c.connected:
+            self.touch_btn.setChecked(False)
+            return
+        left = self._touch_until - time.monotonic()
+        if left <= 0:
+            self._touch_test = False
+            self.touch_btn.setChecked(False)
+            self.probe_lbl.setText(
+                "<b style='color:#c62828'>✗ No touch reported</b> in "
+                f"{self.TOUCH_TEST_SECONDS} s ({self._touch_polls} checks). Check: clip on bare "
+                "copper (not solder mask), the probe lead plugged into the machine, the bit "
+                "clean. If it works in the Wegstr software, record both through the bridge.")
+            self.win.log(f"Touch test: no 04 reply to {self._touch_polls} probe checks")
+            return
+        if c.link.released or c.job_active or c.busy():
+            return
+        try:
+            c.link.send([HANDSHAKE])
+            self._touch_polls += 1
+        except RuntimeError:
+            pass
+        self.probe_lbl.setText(f"Touch the clip to the tool now and hold it 1 s… "
+                               f"({left:.0f} s)")
 
     def on_probe_event(self, value: int) -> None:
         if self._touch_test:
             self._touch_test = False
             self.touch_btn.setChecked(False)
+            self._touch_timer.stop()
             self.probe_lbl.setText(f"<b style='color:#2e7d32'>✓ Touch detected</b> "
                                    f"(machine Z counter {value}). Wiring OK.")
 
