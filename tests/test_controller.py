@@ -166,3 +166,28 @@ def test_zeroing_axes_one_by_one_restores_trust():
         assert c.position_valid
     finally:
         c.disconnect()
+
+
+def test_micropcb_records_its_own_traffic(tmp_path):
+    """MicroPCB can record like the bridge: TX/RX with times, probe replies whole."""
+    import time as _t
+    from micropcb.bridge.analyze import load
+    from micropcb.bridge.recorder import Recorder
+    from micropcb.controller import MachineController
+    from micropcb.settings import MachineState, Settings
+    from micropcb.sim_machine import SimMachine
+    c = MachineController(Settings(), MachineState(), persist=False)
+    rec = Recorder(tmp_path, "t")
+    c.recorder = rec
+    c.connect(transport=SimMachine(realtime=False, surface=lambda x, y: -100))
+    try:
+        c.zero_axes()
+        c.probe(2.0)
+        rec.record("EV", b"", "note from the UI")
+        _t.sleep(0.05)
+    finally:
+        c.disconnect()
+    meta, rows = load(rec.close())
+    kinds = {r.kind for r in rows}
+    assert {"jog", "ready", "probe"} <= kinds and any(r.dir == "EV" for r in rows)
+    assert sum(1 for r in rows if r.dir == "TX") == sum(1 for r in rows if r.dir == "RX")

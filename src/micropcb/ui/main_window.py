@@ -274,6 +274,18 @@ class MainWindow(QMainWindow):
         crow.addWidget(self.show_traffic)
         crow.addWidget(self.show_keepalive)
         crow.addStretch(1)
+        self.rec_btn = QPushButton("● Record")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.setToolTip(
+            "Record every packet / reply with its time (µs) plus MicroPCB's own actions\n"
+            "(zero, probes, auto-level, jobs) to a CSV in Documents\\MicroPCB captures.\n"
+            "On stop a report and the motion as G-code are written - send them for analysis.")
+        self.rec_btn.toggled.connect(self.toggle_record)
+        crow.addWidget(self.rec_btn)
+        for text, fn in (("Analyze…", self.analyze_capture), ("Folder", self.open_capture_folder)):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            crow.addWidget(b)
         crow.addWidget(clear)
         cl.addLayout(crow)
         right = QSplitter(Qt.Vertical)
@@ -503,6 +515,65 @@ class MainWindow(QMainWindow):
     # ================================================================ actions
     def log(self, text: str) -> None:
         self.console.appendPlainText(time.strftime("%H:%M:%S ") + text)
+        rec = getattr(self, "recorder", None)
+        if rec is not None:     # MicroPCB's actions go into the capture as notes
+            rec.record("EV", b"", text)
+
+    # ---------------------------------------------------------------- recording
+    def toggle_record(self, on: bool) -> None:
+        from ..bridge.recorder import Recorder
+        if on and getattr(self, "recorder", None) is None:
+            c = self.ctl
+            meta = {"app": f"MicroPCB {__version__} (direct)",
+                    "mode": "simulator" if isinstance(c.link._t, SimMachine) else "real machine",
+                    "machine port": self.port_box.currentData() or "-",
+                    "mm per step": self.settings.mm_per_step[0],
+                    "dir": "TX = MicroPCB -> machine, RX = machine -> MicroPCB, "
+                           "EV = MicroPCB console line"}
+            try:
+                self.recorder = Recorder(None, "micropcb", meta)
+            except OSError as e:
+                QMessageBox.warning(self, "Record", f"Cannot create the file:\n{e}")
+                self.rec_btn.setChecked(False)
+                return
+            self.ctl.recorder = self.ctl.link.recorder = self.recorder
+            self.rec_btn.setText("■ Stop rec")
+            self.rec_btn.setStyleSheet("color:#c62828; font-weight:bold;")
+            self.log(f"Recording to {self.recorder.path}")
+        elif not on and getattr(self, "recorder", None) is not None:
+            rec, self.recorder = self.recorder, None
+            self.ctl.recorder = self.ctl.link.recorder = None
+            path = rec.close()
+            self.rec_btn.setText("● Record")
+            self.rec_btn.setStyleSheet("")
+            self.log(f"Recording stopped: {rec.rows} rows in {path}")
+            self._analyze_file(path)
+
+    def _analyze_file(self, path) -> None:
+        from ..bridge.analyze import analyze_file
+        try:
+            rp, mp, rep = analyze_file(path, self.settings.mm_per_step[0])
+        except Exception as e:
+            self.log(f"⚠ analysis failed: {e}")
+            return
+        self.log(f"Report: {rp}")
+        self.log(f"Motion as G-code: {mp}")
+        self.log("Send the .csv (and report) for analysis.")
+
+    def analyze_capture(self) -> None:
+        from ..bridge.recorder import default_folder
+        p, _ = QFileDialog.getOpenFileName(self, "Capture file", str(default_folder()),
+                                           "Capture (*.csv)")
+        if p:
+            self._analyze_file(p)
+
+    def open_capture_folder(self) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from ..bridge.recorder import default_folder
+        d = default_folder()
+        d.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
     def _do(self, fn) -> None:
         try:
@@ -1151,6 +1222,8 @@ class MainWindow(QMainWindow):
         if self.ctl.connected and self.ctl.link.spindle:
             self.ctl.emergency_stop()
             self.ctl.wait_idle(1)
+        if getattr(self, "recorder", None) is not None:
+            self.rec_btn.setChecked(False)
         self.camera.shutdown()
         self.ctl.disconnect()
         self.settings.save()

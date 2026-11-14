@@ -57,7 +57,9 @@ class MachineController:
 
     # ------------------------------------------------------------ helpers
     def _new_link(self) -> SerialLink:
-        return SerialLink(self._on_link_event, performance=self.settings.performance)
+        link = SerialLink(self._on_link_event, performance=self.settings.performance)
+        link.recorder = getattr(self, "recorder", None)   # keep recording across reconnects
+        return link
 
     def _emit(self, ev: str, payload: object = None) -> None:
         try:

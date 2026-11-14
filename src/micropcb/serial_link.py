@@ -45,6 +45,13 @@ EV_TRAFFIC = "traffic"        # payload: (direction 'tx'/'rx', bytes)
 Listener = Callable[[str, object], None]
 
 
+def _reply_bytes(r: Reply) -> bytes:
+    if r.code == ReplyCode.PROBE and r.value is not None:
+        v = r.value & 0xFFFF
+        return bytes((r.code, v >> 8, v & 0xFF))
+    return bytes((r.code,))
+
+
 def open_serial(port: str) -> Transport:
     import serial  # local import: tests / sim mode do not need pyserial
 
@@ -208,19 +215,36 @@ class SerialLink:
         except queue.Empty:
             pass
 
+    recorder = None   # bridge.recorder.Recorder while MicroPCB records its traffic
+
+    def _rec(self, direction: str, data: bytes, note: str = "", t: float | None = None) -> None:
+        r = self.recorder
+        if r is not None:
+            try:
+                r.record(direction, data, note, t)
+            except Exception:
+                pass
+
     def _transact(self, data: bytes) -> Reply | None:
         """Write one packet and wait for exactly one reply."""
         assert self._t is not None
         self._emit(EV_TRAFFIC, ("tx", data))
+        self._rec("TX", data, t=time.perf_counter())
         self._t.write(data)
+        reads = 0
         deadline = time.monotonic() + self.reply_timeout
         while time.monotonic() < deadline:
             chunk = self._t.read(1)
             if not chunk:
                 continue
             self._emit(EV_TRAFFIC, ("rx", chunk))
+            reads += 1
             replies = self._parser.feed(chunk)
             if replies:
+                t = time.perf_counter()
+                for k, r in enumerate(replies):
+                    note = f"re-assembled from {reads} reads" if k == 0 and reads > 1 else ""
+                    self._rec("RX", _reply_bytes(r), note if k == 0 else "extra reply", t)
                 for extra in replies[1:]:  # unexpected extra replies
                     self._handle_status(extra, None)
                 return replies[0]
