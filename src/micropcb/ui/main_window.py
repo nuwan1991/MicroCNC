@@ -199,14 +199,15 @@ class MainWindow(QMainWindow):
         jl.addLayout(steps)
 
         pad = QGridLayout()
-        tip = ("Arrows show TOOL direction relative to the board.\n"
-               "The bed moves the opposite way.")
+        tip_xy = ("Arrows show TOOL direction relative to the board.\n"
+                  "The bed moves the opposite way.")
+        tip_z = "Z+ moves the spindle UP, Z− moves it DOWN (towards the board)."
 
         def jbtn(text: str, axis: str, d: int) -> QPushButton:
             b = QPushButton(text)
             b.setMinimumSize(64, 48)
             b.setStyleSheet("font-size:15px; font-weight:bold;")
-            b.setToolTip(tip)
+            b.setToolTip(tip_z if axis == "z" else tip_xy)
             b.setAutoRepeat(False)
             b.clicked.connect(lambda: self._step_jog(axis, d))
             return b
