@@ -111,6 +111,10 @@ class AutoLevelPanel(QWidget):
         h.addWidget(self.start_btn)
         h.addWidget(self.stop_btn)
         v3.addLayout(h)
+        self.why_lbl = QLabel("")          # why Start is disabled
+        self.why_lbl.setWordWrap(True)
+        self.why_lbl.setStyleSheet("color:#c62828;")
+        v3.addWidget(self.why_lbl)
         h = QHBoxLayout()
         self.save_btn = QPushButton("Save map…")
         self.save_btn.clicked.connect(self.save)
@@ -152,6 +156,20 @@ class AutoLevelPanel(QWidget):
                          and (not c.job_active or c.job_paused))
         self.touch_btn.setEnabled(c.connected and not self.running)
         self.start_btn.setEnabled(ready and c.position_valid)
+        why = ""
+        if self.running:
+            why = ""
+        elif not c.connected:
+            why = "Connect to the machine to start."
+        elif c.link.released:
+            why = "Motors are released - press the machine's release button again."
+        elif c.job_active:
+            why = "A job is active - stop it first."
+        elif not c.position_valid:
+            why = ("Position not trusted (connection lost, motors released or a touch "
+                   "during a move). Set work zero again: Zero all, or Zero X, Y and Z.")
+        self.why_lbl.setText(why)
+        self.why_lbl.setVisible(bool(why))
         self.stop_btn.setEnabled(self.running)
         for w in self.area + [self.spacing, self.margin, self.clear_mm, self.first_mm,
                               self.speed, self.from_job_btn, self.load_btn, self.clear_btn]:

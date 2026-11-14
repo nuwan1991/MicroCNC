@@ -149,3 +149,20 @@ def test_probe_after_touch_test_unlatches_first():
             c.probe(5.0)
     finally:
         c.disconnect()
+
+
+def test_zeroing_axes_one_by_one_restores_trust():
+    from micropcb.controller import MachineController
+    from micropcb.settings import MachineState, Settings
+    from micropcb.sim_machine import SimMachine
+    c = MachineController(Settings(), MachineState(), persist=False)
+    c.connect(transport=SimMachine(realtime=False))
+    try:
+        c.link.position_valid = False
+        c.zero_axes("x")
+        c.zero_axes("y")
+        assert not c.position_valid
+        c.zero_axes("z")
+        assert c.position_valid
+    finally:
+        c.disconnect()

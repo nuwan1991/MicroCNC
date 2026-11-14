@@ -178,10 +178,16 @@ class MachineController:
         for a in axes:
             i = AXES.index(a)
             self.state.work_offset[i] = p[i]
-        if axes == AXES or set(axes) == set(AXES):
-            # user has re-referenced the work -> trust step counting again
+        if self.link.position_valid:
+            self._rezeroed = set()
+        else:
+            self._rezeroed = getattr(self, "_rezeroed", set()) | set(axes)
+        if set(axes) == set(AXES) or self._rezeroed >= set(AXES):
+            # user has re-referenced the work (Zero all, or X, Y and Z one by one)
+            # -> trust step counting again
             self.link.position_valid = True
             self.was_unclean = False
+            self._rezeroed = set()
         self.save_state()
         self._emit(EV_STATE)
 
