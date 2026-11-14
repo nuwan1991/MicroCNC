@@ -1,13 +1,14 @@
 # MicroPCB
 
 Control software for Wegstr CNC machines, focused on PCB milling.
-Status: **Stage 3** — PCB import (Gerber / Excellon from KiCad, EasyEDA), isolation
+Status: **Stage 4** — fixed bed camera: calibration, board alignment from holes / pads,
+obstacle warnings, PCB / toolpath overlay on the live picture; Stage 3: PCB import (Gerber / Excellon from KiCad, EasyEDA), isolation
 routing, copper clearing, drilling, cutout with tabs, tool changes, double-sided
 boards with alignment pins; on top of Stage 2 (3D view, G-code viewer, checks, playback, auto-level) and
 Stage 1 (protocol, serial link, simulator, GUI, G-code jobs).
 
 Docs: [protocol](docs/protocol.md) · [Stage 1 design](docs/stage1-design.md) ·
-[Stage 2](docs/stage2-design.md) · [Stage 3](docs/stage3-design.md) ·
+[Stage 2](docs/stage2-design.md) · [Stage 3](docs/stage3-design.md) · [Stage 4](docs/stage4-design.md) ·
 [capture guide](docs/capture-guide.md)
 
 ## Setup (once)
@@ -55,6 +56,7 @@ Close the original Wegstr software first (only one program can use the port).
 | `src/micropcb/toolpath.py` | toolpath arrays, playback timeline, job checks |
 | `src/micropcb/autolevel.py` | probe grid, height map, toolpath correction |
 | `src/micropcb/pcb/` | Gerber + Excellon readers, board placement, CAM, tool library |
+| `src/micropcb/camera/` | USB camera, bed calibration, alignment, obstacles |
 | `src/micropcb/ui/` | main window, 2D/3D views, G-code viewer, settings |
 | `src/micropcb/bridge/` | bridge for the original Wegstr software |
 | `examples/aircut-test.nc` | air-cut test job for milestone 1.3 |

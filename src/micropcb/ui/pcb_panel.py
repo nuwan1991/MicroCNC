@@ -212,6 +212,8 @@ class PcbPanel(QWidget):
         self._show_info()
         if hasattr(self.win, "cam"):
             self.win.cam.refresh()
+        if hasattr(self.win, "camera"):
+            self.win.camera._sync_sim()
 
     def _show_info(self) -> None:
         pb = self.placed

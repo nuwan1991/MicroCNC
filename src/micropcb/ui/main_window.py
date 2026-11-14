@@ -30,6 +30,9 @@ from ..toolpath import ERROR, Timeline, Toolpath, check_program
 from ..autolevel import apply_heightmap
 from .autolevel_panel import AutoLevelPanel
 from .cam_panel import CamPanel
+from .camera_panel import CameraPanel
+from .camera_view import CameraView
+from ..camera.align import apply_alignment
 from .pcb_panel import PcbPanel
 from .pcb_view import PcbView
 from .gcode_view import GCodeView
@@ -314,6 +317,14 @@ class MainWindow(QMainWindow):
         body.addWidget(right, 1)
         self._apply_quality()
         self.view_tabs.addTab(self.pcb_view, "PCB")
+        self.camera_view = CameraView()
+        self.view_tabs.addTab(self.camera_view, "Camera")
+        self.camera = CameraPanel(self, self.camera_view)
+        camera_scroll = QScrollArea()
+        camera_scroll.setWidget(self.camera)
+        camera_scroll.setWidgetResizable(True)
+        camera_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.bottom_tabs.addTab(camera_scroll, "Camera")
 
         self.home_lbl = QLabel()
         self.statusBar().addPermanentWidget(self.home_lbl)
@@ -594,6 +605,9 @@ class MainWindow(QMainWindow):
             self.tp, max_depth_mm=self.settings.check_max_depth_mm,
             max_feed_mm_min=self.ctl.make_planner(prog).max_feed_mm_min,
             area=self._area_lohi())
+        if hasattr(self, "camera"):   # Stage 4.4 obstacles
+            self.issues += self.camera.obstacle_issues(self.tp)
+            self.issues.sort(key=lambda i: (i.line, i.severity != ERROR))
         self._fill_checks()
         self.gcode_view.set_issues((i.line, i.severity) for i in self.issues)
         self._marker = None
@@ -780,17 +794,30 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- auto-level
     def _transformed(self, prog: Program) -> Program:
+        """Camera alignment (X/Y, Stage 4.3) first, then the height map (Z)."""
+        al = self.camera.active_alignment() if hasattr(self, "camera") else None
+        if al is not None:
+            prog = apply_alignment(prog, al)
         hm = self.al.active_map() if hasattr(self, "al") else None
         return apply_heightmap(prog, hm) if hm is not None else prog
 
     def reapply_job(self) -> None:
-        """Height map switched on/off: re-plan preview and future runs."""
+        """Height map / alignment switched on/off: re-plan preview and future runs."""
         hm = self.al.active_map()
-        self.ctl.program_transform = (lambda p: apply_heightmap(p, hm)) if hm else None
+        al = self.camera.active_alignment() if hasattr(self, "camera") else None
+        self.ctl.program_transform = self._transformed if (hm or al) else None
         if hm is not None:
             self.log("Height map applied to the job")
+        if al is not None:
+            self.log(f"Camera alignment applied: {al.angle_deg:+.3f}°, "
+                     f"X {al.tx:+.3f} Y {al.ty:+.3f} mm")
         if self.job_prog_raw is not None and not self.ctl.job_active:
             self._set_program(self._transformed(self.job_prog_raw))
+
+    def recheck_job(self) -> None:
+        """Obstacles changed: run the checks again."""
+        if getattr(self, "job_prog", None) is not None and not self.ctl.job_active:
+            self._set_program(self.job_prog)
 
     def show_heightmap(self, hm) -> None:
         for v in self._views():
@@ -1065,6 +1092,7 @@ class MainWindow(QMainWindow):
         if self.ctl.connected and self.ctl.link.spindle:
             self.ctl.emergency_stop()
             self.ctl.wait_idle(1)
+        self.camera.shutdown()
         self.ctl.disconnect()
         self.settings.save()
         e.accept()
