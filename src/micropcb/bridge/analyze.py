@@ -109,15 +109,34 @@ def report(meta: list[str], rows: list[Row], mmps: float = MM_PER_STEP) -> str:
                    f"Z {lo[2]:.3f}…{hi[2]:.3f} mm (from capture start)")
         fp = np.array(motion[-1].pos) * mmps
         out.append(f"  end position  X {fp[0]:.3f}  Y {fp[1]:.3f}  Z {fp[2]:.3f} mm")
-        # real time per tick while streaming: packet spacing / 3
+        # machine pace = spacing of its 'ready' replies while streaming (3 ticks each);
+        # TX spacing also contains the PC software's own delay
+        ready = [r for r in rx if r.kind == "ready"]
+        rt = np.array([r.t for r in ready])
+        if len(rt) > 2:
+            g = np.diff(rt) * 1000
+            g = g[(g > 30) & (g < 120)]
+            if len(g):
+                out.append(f"  machine pace (ready replies while streaming): {_stats(g)}"
+                           f"  -> {np.median(g) / 3:.2f} ms per tick")
+        turn = []
+        last_rx = None
+        for r in rows:
+            if r.dir == "RX":
+                last_rx = r.t
+            elif r.dir == "TX" and r.kind in ("job", "jog") and last_rx is not None:
+                turn.append((r.t - last_rx) * 1000)
+                last_rx = None
+        turn = [v for v in turn if v < 200]
+        if turn:
+            out.append(f"  PC turnaround (reply -> next packet): {_stats(turn)}")
         for kind in ("job", "jog"):
             ts = np.array([r.t for r in motion if r.kind == kind])
             if len(ts) > 2:
                 gaps = np.diff(ts) * 1000
                 stream = gaps[gaps < 200]
                 if len(stream):
-                    out.append(f"  {kind} packet spacing while streaming: {_stats(stream)}"
-                               f"  -> {np.median(stream) / 3:.2f} ms per tick")
+                    out.append(f"  {kind} packet spacing (incl. PC delay): {_stats(stream)}")
         # speeds
         v = np.hypot(arr[:, 0], arr[:, 1]) * mmps / NOMINAL_TICK * 60
         out.append(f"  XY speed at nominal {NOMINAL_TICK * 1000:.1f} ms/tick: max {v.max():.0f} "
@@ -184,7 +203,9 @@ def motion_gcode(rows: list[Row], mmps: float = MM_PER_STEP) -> str:
     seg_time = 0.0
     seg_kind = None
     spindle = False
-    motion = [r for r in rows if r.dir == "TX" and r.kind in ("job", "jog")]
+    motion = [r for r in rows if (r.dir == "TX" and r.kind in ("job", "jog"))
+              or (r.dir == "RX" and r.kind == "probe")]
+    k_probe = None    # machine Z counter -> our Z steps (set at first touch)
 
     def flush():
         nonlocal seg_dir, seg_time
@@ -198,7 +219,20 @@ def motion_gcode(rows: list[Row], mmps: float = MM_PER_STEP) -> str:
 
     seg_start = pos.copy()
     for k, r in enumerate(motion):
-        dt = (motion[k + 1].t - r.t) if k + 1 < len(motion) else NOMINAL_TICK * 3
+        if r.dir == "RX":
+            # the machine refuses Z- steps after a touch: re-sync Z from its counter
+            if "counter" in r.note:
+                c = int(r.note.split("counter")[-1].split()[0])
+                if k_probe is None:
+                    k_probe = round(pos[2] / mmps) - c
+                else:
+                    flush()
+                    pos[2] = (c + k_probe) * mmps
+                    seg_start = pos.copy()
+                    out.append(f"( probe touch {r.t:.3f} s, machine Z counter {c} )")
+            continue
+        nxt = next((m for m in motion[k + 1:] if m.dir == "TX"), None)
+        dt = (nxt.t - r.t) if nxt is not None else NOMINAL_TICK * 3
         dt_tick = min(dt, 0.2) / 3
         if r.kind != seg_kind:
             flush()

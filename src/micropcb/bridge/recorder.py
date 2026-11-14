@@ -56,6 +56,7 @@ class Recorder:
         self._last = {TX: None, RX: None}
         self._last_tx = None
         self.pos = [0, 0, 0]
+        self._k_probe = None
         self.rows = 0
         self.closed = False
         self._last_flush = 0.0
@@ -88,6 +89,11 @@ class Recorder:
                 v = (data[1] << 8) | data[2]
                 v = v - 0x10000 if v & 0x8000 else v
                 note = (note + " " if note else "") + f"probe Z counter {v}"
+                # steps sent after the touch are refused by the machine: re-sync Z
+                if self._k_probe is None:
+                    self._k_probe = self.pos[2] - v
+                else:
+                    self.pos[2] = v + self._k_probe
             self._w.writerow([f"{t:.6f}", direction, data.hex(" "), kind, ticks, spindle,
                               *self.pos, gap, reply, note])
             self.rows += 1

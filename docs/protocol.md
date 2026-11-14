@@ -208,3 +208,22 @@ Answer these with a serial sniffer while using the original software:
 
 Suggested capture sessions: connect → idle 10 s → jog X+ 1 mm → jog Z− →
 spindle on/off → small G-code job → probe touch → press E-stop.
+
+## Observations from bridge capture 2026-11-14 (original software, real machine, PCB_test.txt + 55-point auto-level)
+- **Machine pace:** `01` replies arrive every 59.2 ms while streaming = **19.74 ms per tick**, constant;
+  the reply comes ~40 ms after a packet, i.e. the machine holds ~1 packet in a buffer and
+  answers when a slot is free. The original software answers in 0.5–30 ms (median 16 ms) and
+  never starved the machine.
+- **Speed:** jog, rapid (G0) and feed all run at max 14 steps/tick (≈170 mm/min); the original
+  software does not make G0 faster.
+- **Ramp:** every G-code segment starts at 10 steps/tick (main axis) and adds 1 per tick up to 14;
+  there is **no deceleration** — segments end abruptly (last tick = remainder) and the next starts
+  at 10 again, also at corners and on each short arc piece.
+- **Spindle:** the job starts moving in the same packet that sets the spindle bit — no spin-up wait.
+  G0 X Y Z is executed as one 3-axis line.
+- **Probing:** Z− at 14 steps/tick until reply `04 hi lo`; ~80 steps (2 packets) that were already
+  sent after the touch are refused by the machine, so the sent-step count drifts by ≈0.32 mm per
+  probe while the counter stays exact (repeat touches −2495, −2495, −2495). The lift after a touch
+  starts with ramp 10,11,12… Use the counter, never the sent steps (MicroPCB does).
+- MicroPCB's planner estimate for PCB_test.txt (5109 ticks = 100.8 s) matches the original run
+  (99.8 s) within 1 %.
