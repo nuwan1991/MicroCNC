@@ -1,6 +1,6 @@
 # Split into MicroPCB CAM + MicroPCB Control (design draft)
 
-Status: **design agreed (section 10) – nothing built yet.** Written 2026-11-15 for MicroPCB 0.2.2.
+Status: **design agreed (section 10). Phase 1 built in 0.2.3** (side file, per-tool export, side file read on open). Written 2026-11-15 for MicroPCB 0.2.2.
 
 ## 1. Goal
 

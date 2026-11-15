@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QMessageBox, QPushButton, QSpinBox, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from .. import __version__, jobfile
 from ..pcb import cam
 from ..pcb.board import Placement
 from ..pcb.tools import DRILL, ENDMILL, VBIT, Tool, ToolLibrary
@@ -97,6 +98,7 @@ class CamPanel(QWidget):
         self.win = win
         self.lib = ToolLibrary.load()
         self.text: str | None = None
+        self._last = None   # (placed board, ops, side, title, side_no) of the last Generate
         root = QVBoxLayout(self)
 
         top = QHBoxLayout()
@@ -231,8 +233,14 @@ class CamPanel(QWidget):
         self.s2_btn = QPushButton("Side 2 job")
         self.s2_btn.clicked.connect(lambda: self.generate(2))
         self.save_btn = QPushButton("Save G-code…")
+        self.save_btn.setToolTip("One file with all operations (tool changes pause the job)\n"
+                                 "+ side file <name>.nc.json with the board data")
         self.save_btn.clicked.connect(self.save)
-        for b in (self.gen_btn, self.s1_btn, self.s2_btn, self.save_btn):
+        self.export_btn = QPushButton("Export per tool…")
+        self.export_btn.setToolTip("One .nc per tool (the standard way) + side files +\n"
+                                   "<board>-jobs.json with the order, into a folder")
+        self.export_btn.clicked.connect(self.export_per_tool)
+        for b in (self.gen_btn, self.s1_btn, self.s2_btn, self.save_btn, self.export_btn):
             act.addWidget(b)
         act.addStretch(1)
         root.addLayout(act)
@@ -294,6 +302,7 @@ class CamPanel(QWidget):
         for b in (self.s1_btn, self.s2_btn):
             b.setEnabled(has and ds)
         self.save_btn.setEnabled(self.text is not None)
+        self.export_btn.setEnabled(self.text is not None and bool(self._last))
         if has:
             pl = pcb.placement()
             side = "bottom copper (mirrored)" if pl.mirror else "top copper"
@@ -370,6 +379,7 @@ class CamPanel(QWidget):
                 title = f"side {side_no} ({'bottom up, flipped' if mirror else 'top up'})"
                 pcb.side.setCurrentIndex(0 if mirror else 1)   # show what is being cut
             self.text = cam.combine(ops, title, self.safe.value())
+            self._last = (pb, ops, "bottom" if pb.placement.mirror else "top", title, side_no)
         except Exception as e:
             QApplication.restoreOverrideCursor()
             QMessageBox.warning(self, "Generate", f"Could not generate:\n{e}")
@@ -411,3 +421,56 @@ class CamPanel(QWidget):
             with open(path, "w", encoding="utf-8") as f:
                 f.write(self.text)
             self.win.log(f"G-code saved: {path}")
+            info = self._info(self._last[1]) if self._last else None
+            if info is not None:
+                jobfile.write(path, self.text, info)
+                self.win.log(f"  side file: {os.path.basename(jobfile.side_path(path))}")
+                self.win.set_job_info(info, path)
+
+    def _info(self, ops):
+        pb, _, side, _, _ = self._last
+        pcb = self.win.pcb
+        return cam.job_info(pb, ops, side, [os.path.basename(pcb.source or "")],
+                            f"MicroPCB {__version__}")
+
+    def export_per_tool(self) -> None:
+        """One .nc per tool + side files + job list (docs/split-design.md section 10)."""
+        if not self._last:
+            return
+        pb, ops, side, title, side_no = self._last
+        folder = QFileDialog.getExistingDirectory(self, "Export folder", self.win.settings.last_dir)
+        if not folder:
+            return
+        board = os.path.splitext(os.path.basename(self.win.pcb.source or "board"))[0]
+        tag = f"side{side_no}" if side_no else side
+        files = []
+        for n, group in enumerate(cam.per_tool(ops), 1):
+            kinds = []
+            for o in group:
+                k = cam.op_kind(o)
+                if k not in kinds:
+                    kinds.append(k)
+            tool = group[0].tool
+            name = f"{board}-{tag}-{n}-{'+'.join(kinds)}-{re.sub(r'[^A-Za-z0-9.]+', '_', tool.name)}.nc"
+            text = cam.combine(group, f"{title}: {', '.join(o.name for o in group)}",
+                               self.safe.value())
+            path = os.path.join(folder, name)
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                jobfile.write(path, text, self._info(group))
+            except OSError as e:
+                QMessageBox.warning(self, "Export", f"Cannot write {name}:\n{e}")
+                return
+            files.append({"file": name, "operation": "+".join(kinds), "tool": tool.label})
+        lst = jobfile.write_list(os.path.join(folder, f"{board}-{tag}-jobs.json"), board, files)
+        self.win.settings.last_dir = folder
+        self.win.log(f"Exported {len(files)} file(s) to {folder} (order in "
+                     f"{os.path.basename(lst)}):")
+        for k, f in enumerate(files, 1):
+            self.win.log(f"  {k}. {f['file']} - {f['tool']}")
+        QMessageBox.information(
+            self, "Export",
+            f"{len(files)} G-code file(s), one per tool, written to\n{folder}\n\n"
+            + "\n".join(f"{k}. {f['file']}" for k, f in enumerate(files, 1))
+            + "\n\nRun them in this order. After each tool change: Probe + set Z 0.")

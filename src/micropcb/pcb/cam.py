@@ -442,3 +442,79 @@ def combine(ops: list[OpResult], title: str, safe_z: float = 2.0,
         out.extend(op.lines)
     out += ["M5", f"G0 Z{safe_z:.3f}", "M30"]
     return "\n".join(out) + "\n"
+
+
+# ---------------------------------------------------------------- side file (split design)
+def op_kind(op: OpResult) -> str:
+    n = op.name.lower()
+    for key, kind in (("isolation", "isolation"), ("clearing", "clearing"),
+                      ("drill", "drilling"), ("mill holes", "holes"),
+                      ("cutout", "cutout"), ("pin", "pins")):
+        if key in n:
+            return kind
+    return "combined"
+
+
+def tool_dict(t: Tool, depth: float | None = None) -> dict:
+    d = {"name": t.name, "label": t.label, "kind": t.kind, "diameter_mm": t.diameter,
+         "angle_deg": t.angle, "tip_mm": t.tip, "feed": t.feed, "plunge": t.plunge}
+    if depth is not None:
+        d["depth_mm"] = depth
+        d["cut_width_mm"] = round(t.cut_width(depth), 4)
+    return d
+
+
+def job_info(pb, ops: list[OpResult], side: str, source: list[str] | None = None,
+             app: str = "", max_pad_mm: float = 4.0):
+    """Side-file data (micropcb.jobfile.JobInfo) for G-code made from these ops."""
+    from shapely.geometry import MultiPolygon, Polygon
+
+    from ..jobfile import JobFeature, JobInfo
+    from .board import as_polygons
+    ops = [o for o in ops if not o.empty]
+    kinds = {op_kind(o) for o in ops}
+    tools, seen = [], set()
+    for o in ops:
+        if o.tool.name not in seen:
+            seen.add(o.tool.name)
+            tools.append(tool_dict(o.tool))
+    feats = [JobFeature("hole", h.x, h.y, h.d) for h in getattr(pb, "holes", [])]
+    copper_rings = []
+    for g in (getattr(pb, "copper", {}) or {}).values():
+        for poly in sorted(as_polygons(g), key=lambda p: -p.area):
+            x0, y0, x1, y1 = poly.bounds
+            if max(x1 - x0, y1 - y0) <= max_pad_mm and poly.area > 0.05:
+                c = poly.centroid
+                if not any(abs(f.x - c.x) < 0.2 and abs(f.y - c.y) < 0.2 for f in feats):
+                    feats.append(JobFeature("pad", c.x, c.y, max(x1 - x0, y1 - y0)))
+            s = poly.simplify(0.01)
+            if isinstance(s, Polygon) and not s.is_empty:
+                copper_rings.append(list(s.exterior.coords))
+    outline = []
+    if pb.outline is not None and not pb.outline.is_empty:
+        g = pb.outline
+        polys = list(g.geoms) if isinstance(g, MultiPolygon) else as_polygons(g) or [g.convex_hull]
+        outline = [list(p.exterior.coords) for p in polys if hasattr(p, "exterior")]
+    xs = [p[0] for o in ops for path in o.paths for p in path]
+    ys = [p[1] for o in ops for path in o.paths for p in path]
+    pl = pb.placement
+    return JobInfo(
+        operation=kinds.pop() if len(kinds) == 1 else "combined",
+        side=side, mirror_x_mm=(pb.size[0] / 2 + pl.margin) if pl.mirror else None,
+        board_size=tuple(pb.size), outline=outline, tools=tools, features=feats,
+        copper=copper_rings,
+        cut_area=(min(xs), min(ys), max(xs), max(ys)) if xs else None,
+        source=list(source or []), app=app)
+
+
+def per_tool(ops: list[OpResult]) -> list[list[OpResult]]:
+    """Group consecutive operations that use the same tool (one file each)."""
+    groups: list[list[OpResult]] = []
+    for o in ops:
+        if o.empty:
+            continue
+        if groups and groups[-1][-1].tool.name == o.tool.name:
+            groups[-1].append(o)
+        else:
+            groups.append([o])
+    return groups

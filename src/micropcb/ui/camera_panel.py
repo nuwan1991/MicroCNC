@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout
                                QPushButton, QSlider, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from ..camera.align import (AlignPoint, Alignment, board_features, fit_alignment,
+from ..camera.align import (AlignPoint, Alignment, Feature, board_features, fit_alignment,
                             nearest_feature, refine_feature)
 from ..camera.calib import CalibPoint, CameraCalib, calibrate_lens, mark_job, mark_points
 from ..camera.device import SIM, Camera, CameraInfo, SimScene, list_cameras
@@ -566,7 +566,12 @@ class CameraPanel(QWidget):
     # ================================================================ alignment
     def _features(self):
         pb = getattr(self.win.pcb, "placed", None)
-        return board_features(pb) if pb is not None else []
+        if pb is not None:
+            return board_features(pb)
+        info = getattr(self.win, "job_meta", None)      # side file of the opened G-code
+        if info is not None:
+            return [Feature(f.x, f.y, f.kind, f.size) for f in info.features]
+        return []
 
     def _add_align_point(self, x: float, y: float) -> None:
         if not self.calib().ok:
