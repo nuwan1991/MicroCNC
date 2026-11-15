@@ -95,6 +95,26 @@ def shift_program(prog: Program, dx: float, dy: float) -> Program:
     return out
 
 
+def limit_depth(prog: Program, max_depth: float) -> tuple[Program, int, float]:
+    """Raise every Z below -max_depth to -max_depth (shallower cuts unchanged).
+    Returns (program, moves changed, deepest Z in the file)."""
+    lim = -abs(max_depth)
+    deepest = min((min(m.start[2], m.end[2]) for m in prog.moves if m.kind == LINE),
+                  default=0.0)
+    if deepest >= lim:
+        return prog, 0, deepest
+    out = Program(warnings=list(prog.warnings), line_count=prog.line_count,
+                  max_feed=prog.max_feed)
+    n = 0
+    for m in prog.moves:
+        if m.kind == LINE and (m.start[2] < lim or m.end[2] < lim):
+            n += 1
+            m = replace(m, start=(*m.start[:2], max(m.start[2], lim)),
+                        end=(*m.end[:2], max(m.end[2], lim)))
+        out.moves.append(m)
+    return out, n, deepest
+
+
 class GCodeError(ValueError):
     pass
 

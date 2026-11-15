@@ -10,7 +10,7 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
                                QSlider, QVBoxLayout, QWidget, QAbstractSpinBox,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 from .. import __version__
 from ..controller import AXES, EV_JOB, EV_STATE, MachineController
-from ..gcode import GCodeError, Program, job_min_xy, parse, shift_program
+from ..gcode import GCodeError, Program, job_min_xy, limit_depth, parse, shift_program
 from ..job import DONE, FAILED, PAUSED_STATE, PAUSING, RUNNING, STOPPED, STOPPING
 from ..protocol import TICK_SECONDS
 from ..serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_LOST, EV_OVERLOAD,
@@ -402,6 +402,27 @@ class MainWindow(QMainWindow):
             max(0, self.origin_combo.findData(getattr(self.settings, "job_origin", "file"))))
         self.origin_combo.currentIndexChanged.connect(self._origin_changed)
         orow.addWidget(self.origin_combo)
+        orow.addSpacing(12)
+        self.depth_chk = QCheckBox("Max cut depth")
+        self.depth_chk.setToolTip(
+            "Cuts deeper than this are raised to it; shallower cuts stay as they are.\n"
+            "For engraving with a V-bit (a deeper cut is a wider groove that eats thin\n"
+            "tracks). Switch it OFF for drilling and board cutout files.\n"
+            "The file itself is not changed; the height map is added after this.")
+        self.depth_spin = QDoubleSpinBox()
+        self.depth_spin.setRange(0.01, 2.0)
+        self.depth_spin.setDecimals(3)
+        self.depth_spin.setSingleStep(0.01)
+        self.depth_spin.setSuffix(" mm")
+        md = float(getattr(self.settings, "job_max_depth", 0.0) or 0.0)
+        self.depth_spin.setValue(md or 0.05)
+        self.depth_chk.setChecked(md > 0)
+        self.depth_spin.setEnabled(md > 0)
+        self.depth_chk.toggled.connect(self.depth_spin.setEnabled)
+        self.depth_chk.toggled.connect(lambda _: self._origin_changed())
+        self.depth_spin.editingFinished.connect(self._origin_changed)
+        orow.addWidget(self.depth_chk)
+        orow.addWidget(self.depth_spin)
         orow.addStretch(1)
         v.addLayout(orow)
         self.job_info = QLabel("No file loaded")
@@ -747,12 +768,25 @@ class MainWindow(QMainWindow):
         if abs(dx) > 1e-6 or abs(dy) > 1e-6:
             self.log(f"  Job origin: moved by X {dx:+.3f} Y {dy:+.3f} mm "
                      "(front-left corner of the job = work 0)")
-            return shift_program(raw, dx, dy)
-        self.ctl.job_shift = (0.0, 0.0)
+            raw = shift_program(raw, dx, dy)
+        else:
+            self.ctl.job_shift = (0.0, 0.0)
+        md = self.depth_spin.value() if self.depth_chk.isChecked() else 0.0
+        self.ctl.job_max_depth = md
+        if md:
+            raw, n, deepest = limit_depth(raw, md)
+            if n:
+                self.log(f"  Max cut depth {md:.3f} mm: {n} move(s) raised (deepest in the "
+                         f"file {deepest:.3f} mm)")
+            else:
+                self.log(f"  Max cut depth {md:.3f} mm: nothing deeper in the file "
+                         f"(deepest {deepest:.3f} mm)")
         return raw
 
     def _origin_changed(self) -> None:
         self.settings.job_origin = self.origin_combo.currentData()
+        self.settings.job_max_depth = (self.depth_spin.value() if self.depth_chk.isChecked()
+                                       else 0.0)
         if self.job_text is not None and not self.ctl.job_active:
             meta = self.job_meta
             self.load_job_text(self.job_text, self.job_path or "job.nc")

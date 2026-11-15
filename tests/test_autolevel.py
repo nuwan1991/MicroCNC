@@ -429,3 +429,20 @@ def test_first_probe_after_connect_clears_old_touch():
         assert z == pytest.approx(-2.0, abs=0.06)
     finally:
         c.disconnect()
+
+
+def test_limit_depth_and_controller_applies_it():
+    from micropcb.gcode import limit_depth
+    text = "G0 X0 Y0 Z1\nG1 Z-0.03 F50\nG1 X5 F100\nG1 Z-0.12 F50\nG1 X9 F100\nG0 Z1\n"
+    prog = parse(text, (0.0, 0.0, 0.0))
+    out, n, deepest = limit_depth(prog, 0.05)
+    assert deepest == pytest.approx(-0.12) and n == 3   # plunge, cut, lift start
+    zs = [m.end[2] for m in out.lines()]
+    assert min(zs) == pytest.approx(-0.05) and -0.03 in zs and 1 in zs
+    assert limit_depth(prog, 0.2)[1] == 0
+    c = _ctl(lambda x, y: -5000)
+    try:
+        c.job_max_depth = 0.05
+        assert min(m.end[2] for m in c.program_for_run(text).lines()) == pytest.approx(-0.05)
+    finally:
+        c.disconnect()

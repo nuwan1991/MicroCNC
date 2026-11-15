@@ -19,6 +19,7 @@ class Settings:
     mm_per_step: list[float] = field(default_factory=lambda: [0.004, 0.004, 0.004])
     work_area_mm: list[float] = field(default_factory=lambda: [140.0, 200.0, 40.0])
     max_steps_per_tick: int = 14
+    job_max_depth: float = 0.0       # mm, 0 = off ("Max cut depth" of the job)
     job_origin: str = "file"         # "file" | "corner" (front-left of the job = work 0)
     jog_steps_per_tick: int = 14
     performance: int = 4

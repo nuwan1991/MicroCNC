@@ -16,7 +16,7 @@ from typing import Callable
 
 import numpy as np
 
-from .gcode import Program, parse, shift_program
+from .gcode import Program, limit_depth, parse, shift_program
 from .job import PAUSED_STATE, Job
 from .autolevel import HeightMap, outliers, probe_order
 from .jog import jog_ticks, pack
@@ -55,6 +55,7 @@ class MachineController:
         self.probe_log: list[str] = []
         self.program_transform: Callable[[Program], Program] | None = None
         self.job_shift: tuple[float, float] = (0.0, 0.0)   # X/Y added to the job (mm)
+        self.job_max_depth: float = 0.0   # mm, 0 = off: deeper cuts are raised to this
 
     # ------------------------------------------------------------ helpers
     def _new_link(self) -> SerialLink:
@@ -626,6 +627,8 @@ class MachineController:
         prog = parse(text, self.work_mm() if self.connected else (0.0, 0.0, 0.0))
         if self.job_shift != (0.0, 0.0):   # "Job origin: front-left corner = work 0"
             prog = shift_program(prog, *self.job_shift)
+        if self.job_max_depth:               # "Max cut depth" (before the height map)
+            prog = limit_depth(prog, self.job_max_depth)[0]
         if self.program_transform is not None:  # e.g. auto-level height map
             prog = self.program_transform(prog)
         return prog
