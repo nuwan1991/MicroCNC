@@ -22,6 +22,11 @@ GUI:
 ```
 .venv\Scripts\python -m micropcb
 ```
+MicroPCB CAM - Gerber / drill to G-code, no machine needed
+(see [split design](docs/split-design.md)):
+```
+.venv\Scripts\python -m micropcb.apps.cam
+```
 Bridge for the original Wegstr software (auto-level fix / simulated machine),
 see [bridge guide](docs/bridge-guide.md):
 ```

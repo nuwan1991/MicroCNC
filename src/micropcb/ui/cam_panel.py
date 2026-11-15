@@ -451,7 +451,7 @@ class CamPanel(QWidget):
                 if k not in kinds:
                     kinds.append(k)
             tool = group[0].tool
-            name = f"{board}-{tag}-{n}-{'+'.join(kinds)}-{re.sub(r'[^A-Za-z0-9.]+', '_', tool.name)}.nc"
+            name = f"{board}-{tag}-{n:02d}-{'+'.join(kinds)}-{re.sub(r'[^A-Za-z0-9.]+', '_', tool.name)}.nc"
             text = cam.combine(group, f"{title}: {', '.join(o.name for o in group)}",
                                self.safe.value())
             path = os.path.join(folder, name)
