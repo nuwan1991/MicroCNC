@@ -126,7 +126,7 @@ class SimMachine:
                     self._late_left -= 1
                     return self._status(), 3 * TICK_SECONDS
                 self._late_left = None
-                v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                v = (self.fw_z_offset - self.pos[2]) & 0xFFFF   # counts DOWN going up, like the hardware
                 return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
             surf = self._surface_z() if header == HEADER_JOG else None
             for t in ticks:
@@ -140,7 +140,7 @@ class SimMachine:
                 elif t.z < 0 and header == HEADER_JOG and self.contact:
                     # clip held against the tool by hand: reported on a Z- move
                     self.latched = True
-                    v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                    v = (self.fw_z_offset - self.pos[2]) & 0xFFFF   # counts DOWN going up, like the hardware
                     return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.009
                 if surf is not None and t.z < 0 and self.pos[2] <= surf:
                     # already touching: firmware does not move further down (capture 1)
@@ -153,7 +153,7 @@ class SimMachine:
                         if self.late_report:
                             self._late_left = self.late_report - 1
                             return self._status(), 3 * TICK_SECONDS
-                        v = (self.pos[2] + self.fw_z_offset) & 0xFFFF
+                        v = (self.fw_z_offset - self.pos[2]) & 0xFFFF   # counts DOWN going up, like the hardware
                         return bytes((ReplyCode.PROBE, v >> 8, v & 0xFF)), 0.02
                 self.pos[0] += t.x
                 self.pos[1] += t.y

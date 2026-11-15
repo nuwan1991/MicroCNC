@@ -106,7 +106,7 @@ def test_probe_reply_delivered_in_one_piece():
             reply = pc.read(64)
             if reply[:1] == b"\x04":
                 break
-        assert reply == b"\x04\xff\x9c"  # -100 in one chunk, not 04 / ff / 9c
+        assert reply == b"\x04\x00\x64"  # counter 100 (counts down going up), in one chunk
         assert br.stats["reassembled"] == 1
     finally:
         br.stop()
@@ -127,7 +127,7 @@ def test_simulator_mode_end_to_end_with_serial_link():
         assert sim.pos[0] == 500
         link.send(pack(jog_ticks("z", -1000)))
         assert link.wait_idle(5)
-        assert [p for e, p in events if e == EV_PROBE] == [-55]
+        assert [p for e, p in events if e == EV_PROBE] == [55]   # counter counts down going up
         time.sleep(0.2)
         assert sim.performance == 4  # keep-alive passed through
     finally:

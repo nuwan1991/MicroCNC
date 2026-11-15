@@ -385,7 +385,11 @@ class MachineController:
                 raise ProbeError(f"No touch within {max_travel_mm:.2f} mm - is the clip on the "
                                  "copper and the tool above the board?")
             self.link.wait_idle(2)
-            value = int(self._probe_value)  # type: ignore[arg-type]
+            # The machine's Z counter counts DOWN when the tool goes UP (hardware
+            # 2026-11-15 15:30: tool lifted 250 steps, hand touch read 5525 -> 5260).
+            # Negate it so it runs the same way as our Z steps. Before 0.2.12 it was
+            # used as is: every height map was upside down.
+            value = -int(self._probe_value)  # type: ignore[arg-type]
         finally:
             self._probe_wait = None
         before = self.link.position  # counted steps exclude the packet that hit
@@ -561,6 +565,7 @@ class MachineController:
         self.jog("z", clearance_mm)
         self.wait_idle(30)
         hm.meta.update({"points": hm.probed, "clearance_mm": clearance_mm,
+                        "counter_fixed": True,     # 0.2.12+: Z counter direction corrected
                         "drift_mm": round(float(drift), 4),
                         "time": time.strftime("%Y-%m-%d %H:%M:%S")})
         return hm

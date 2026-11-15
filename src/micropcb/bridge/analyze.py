@@ -159,13 +159,14 @@ def report(meta: list[str], rows: list[Row], mmps: float = MM_PER_STEP) -> str:
     pr = [r for r in rx if r.kind == "probe"]
     if pr:
         out.append("")
-        out.append("Probe touches (machine Z counter, Δ to first):")
+        out.append("Probe touches (machine Z counter, Δ to first; the counter counts DOWN "
+                   "when the tool goes UP, so Δ = -(counter change)):")
         first = None
         for r in pr[:50]:
             val = int(r.note.split("counter")[-1].split()[0]) if "counter" in r.note else None
             first = val if first is None else first
             z = r.pos[2] * mmps
-            d = f"{(val - first) * mmps:+.3f} mm" if val is not None else ""
+            d = f"{-(val - first) * mmps:+.3f} mm" if val is not None else ""
             out.append(f"  {r.t:10.3f} s  counter {val}  {d}  (sent Z {z:.3f} mm) {r.note}")
     # anomalies
     out.append("")
@@ -234,7 +235,7 @@ def motion_gcode(rows: list[Row], mmps: float = MM_PER_STEP) -> str:
         if r.dir == "RX":
             # the machine refuses Z- steps after a touch: re-sync Z from its counter
             if "counter" in r.note:
-                c = int(r.note.split("counter")[-1].split()[0])
+                c = -int(r.note.split("counter")[-1].split()[0])   # counts down going up
                 if k_probe is None:
                     k_probe = round(pos[2] / mmps) - c
                 else:

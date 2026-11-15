@@ -367,3 +367,49 @@ def test_cut_bounds_ignores_start_and_travel():
     prog = parse("G0 X0 Y0 Z2\nG0 X5 Y4\nG1 Z-0.05 F50\nG1 X9 Y6 F100\nG0 Z2\nG0 X30 Y40\n",
                  (-9.22, -3.0, 5.0))
     assert cut_bounds(prog) == (5, 4, 9, 6)
+
+
+def test_counter_counts_down_going_up_like_hardware():
+    """Hardware 2026-11-15 15:30: copper counter 5525; tool 250 steps up, hand
+    touch -> 5260 (counter DOWN when the tool goes UP). Copper 0.2 mm HIGHER at
+    X 61 must come out as +0.2 in the probe / map (it came out -0.2 before 0.2.12)."""
+    def surface(x, y):                       # copper 1 mm below start, +0.2 mm at X 61
+        return round((-1.0 + 0.2 * (x / S) / 61) * S)
+
+    c = _ctl(surface, fw_offset=5525 - 250)  # counter 5525 at the copper at X 0
+    try:
+        c.probe(3)
+        c.zero_axes("z")
+        z0 = c.link.position[2]
+        assert c.sim.fw_z_offset - c.sim.pos[2] == 5525 - 250 + 250   # raw counter at copper
+        c.jog("z", 1.0)
+        c.wait_idle(5)
+        # counter in the air 1 mm above: lower, like the hand touch on the machine
+        assert c.sim.fw_z_offset - c.sim.pos[2] == 5525 - 250
+        c.jog("x", 61)
+        c.wait_idle(10)
+        z = c.probe(3)
+        assert z == pytest.approx(+0.2, abs=0.06)
+        assert c.link.position[2] - z0 == pytest.approx(0.2 / 0.004, abs=15)
+        # and a map over it rises to the right
+        c.jog("z", 1.0)
+        c.wait_idle(5)
+        c.jog("x", -61)
+        c.wait_idle(10)
+        hm = HeightMap.empty(*make_grid(0, 0, 61, 0, 61))
+        c.run_autolevel(hm)
+        assert hm.z[0, -1] - hm.z[0, 0] == pytest.approx(0.2, abs=0.02)
+    finally:
+        c.disconnect()
+
+
+def test_old_maps_flagged_upside_down():
+    import json
+    from pathlib import Path
+    old = Path(__file__).resolve().parents[1] / "data" / "7.hmap.json"
+    if old.exists():
+        assert HeightMap.from_json(old.read_text(encoding="utf-8")).upside_down
+    hm = HeightMap.empty([0, 1], [0, 1])
+    hm.z[:] = 0.0
+    hm.meta["counter_fixed"] = True
+    assert not HeightMap.from_json(hm.to_json()).upside_down

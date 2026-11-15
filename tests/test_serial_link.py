@@ -74,7 +74,7 @@ def test_probe_stops_motion():
     link.send(pack(jog_ticks("z", -5000)))
     assert link.wait_idle(5)
     probes = [p for e, p in ev.items if e == EV_PROBE]
-    assert probes == [-500]
+    assert probes == [500]   # counter counts down going up
     assert not link.position_valid
     assert sim.pos[2] == -500
     link.close()

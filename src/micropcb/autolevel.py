@@ -51,6 +51,11 @@ class HeightMap:
                    np.full((len(ys), len(xs)), np.nan))
 
     @property
+    def upside_down(self) -> bool:
+        """Measured before 0.2.12 (Z counter read the wrong way round): heights inverted."""
+        return self.probed > 0 and not self.meta.get("counter_fixed")
+
+    @property
     def complete(self) -> bool:
         return bool(np.isfinite(self.z).all())
 
