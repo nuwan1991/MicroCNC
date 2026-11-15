@@ -353,3 +353,10 @@ def test_controller_runs_shifted_job():
         assert prog.lines()[-1].end[:2] == pytest.approx((10.0, 0.0))
     finally:
         c.disconnect()
+
+
+def test_job_min_ignores_travel_moves():
+    from micropcb.gcode import job_min_xy
+    prog = parse("G0 X0 Y-30 Z2\nG0 X5 Y4\nG1 Z-0.05 F50\nG1 X9 Y6 F100\nG0 Z2\nG0 X0 Y-30\n",
+                 (0.0, 0.0, 0.0))
+    assert job_min_xy(prog) == (5, 4)

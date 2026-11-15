@@ -53,7 +53,12 @@ class Program:
 def job_min_xy(prog: Program) -> tuple[float, float] | None:
     """Lowest X and Y the program moves to (end points; the start point is where
     the machine happens to be, not part of the job)."""
-    pts = [m.end for m in prog.moves if m.kind == LINE]
+    # cutting moves only (tool below the copper): a travel / park move with the
+    # tool up must not set the corner (2026-11-15: gap at Y on the machine)
+    pts = [p for m in prog.moves if m.kind == LINE and not m.rapid
+           and min(m.start[2], m.end[2]) < 0 for p in (m.start, m.end) if p[2] < 0]
+    if not pts:
+        pts = [m.end for m in prog.moves if m.kind == LINE]
     if not pts:
         return None
     return min(p[0] for p in pts), min(p[1] for p in pts)
