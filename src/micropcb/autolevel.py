@@ -104,6 +104,52 @@ class HeightMap:
         return cls(np.array(d["xs"], float), np.array(d["ys"], float), z, d.get("meta", {}))
 
 
+def outliers(hm: HeightMap, limit_mm: float = 0.06) -> list[tuple[int, int, float]]:
+    """Points that disagree with a plane fitted through their neighbours.
+
+    Returns (i, j, residual mm), worst first. A real board bends smoothly, so a
+    point more than limit_mm off its neighbours' plane is most likely dirt / a burr
+    under the bit or a bad touch (map 6, 2026-11-15: 0.09 mm high at one point).
+    """
+    out = []
+    ny, nx = hm.z.shape
+    for j in range(ny):
+        for i in range(nx):
+            if not np.isfinite(hm.z[j, i]):
+                continue
+            pts = [(hm.xs[ii], hm.ys[jj], hm.z[jj, ii])
+                   for jj in range(max(0, j - 1), min(ny, j + 2))
+                   for ii in range(max(0, i - 1), min(nx, i + 2))
+                   if (ii, jj) != (i, j) and np.isfinite(hm.z[jj, ii])]
+            if len(pts) < 3:
+                continue
+            a = np.array(pts)
+            A = np.c_[a[:, 0], a[:, 1], np.ones(len(a))]
+            coef, *_ = np.linalg.lstsq(A, a[:, 2], rcond=None)
+            pred = coef @ (hm.xs[i], hm.ys[j], 1.0)
+            r = float(hm.z[j, i] - pred)
+            if abs(r) > limit_mm:
+                # a bump also makes its edge/corner neighbours look off (their plane
+                # leans on it): rank points with more neighbours first
+                out.append((abs(r) * len(pts) / 8, (i, j, r)))
+    return [t for _, t in sorted(out, key=lambda t: -t[0])]
+
+
+def outside_map(prog: Program, hm: HeightMap, tol_mm: float = 0.5) -> str | None:
+    """Describe where the job's cutting moves leave the measured area (None = inside)."""
+    xs = [p[0] for m in prog.moves if m.kind == LINE and not m.rapid for p in (m.start, m.end)]
+    ys = [p[1] for m in prog.moves if m.kind == LINE and not m.rapid for p in (m.start, m.end)]
+    if not xs:
+        return None
+    lo_x, hi_x, lo_y, hi_y = min(xs), max(xs), min(ys), max(ys)
+    if (lo_x >= hm.xs[0] - tol_mm and hi_x <= hm.xs[-1] + tol_mm
+            and lo_y >= hm.ys[0] - tol_mm and hi_y <= hm.ys[-1] + tol_mm):
+        return None
+    return (f"the job cuts X {lo_x:.1f} … {hi_x:.1f}, Y {lo_y:.1f} … {hi_y:.1f} mm but the "
+            f"height map only covers X {hm.xs[0]:.1f} … {hm.xs[-1]:.1f}, "
+            f"Y {hm.ys[0]:.1f} … {hm.ys[-1]:.1f} mm")
+
+
 def apply_heightmap(prog: Program, hm: HeightMap, max_seg_mm: float = 1.0) -> Program:
     """Return a new program whose Z follows the measured surface.
 

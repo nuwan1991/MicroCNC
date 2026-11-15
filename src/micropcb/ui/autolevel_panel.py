@@ -58,7 +58,11 @@ class AutoLevelPanel(QWidget):
         self.zero_probe_btn.setToolTip("Probe down here and make the copper surface work Z 0\n"
                                        "(also use this after a tool change)")
         self.zero_probe_btn.clicked.connect(lambda: self._probe_here(zero=True))
-        for b in (self.touch_btn, self.probe_here_btn, self.zero_probe_btn):
+        self.drift_btn = QPushButton("Check Z drift")
+        self.drift_btn.setToolTip("Go back to where Z 0 was set and touch the copper again.\n"
+                                  "0.000 = Z did not drift (use after a job, clip on)")
+        self.drift_btn.clicked.connect(lambda: self.check_drift(ask=False))
+        for b in (self.touch_btn, self.probe_here_btn, self.zero_probe_btn, self.drift_btn):
             v1.addWidget(b)
         self.probe_lbl = QLabel("")
         self.probe_lbl.setWordWrap(True)
@@ -115,6 +119,13 @@ class AutoLevelPanel(QWidget):
         self.why_lbl.setWordWrap(True)
         self.why_lbl.setStyleSheet("color:#c62828;")
         v3.addWidget(self.why_lbl)
+        self.time_lbl = QLabel("")         # elapsed / remaining while measuring
+        self.time_lbl.setStyleSheet("font-weight:bold;")
+        self.time_lbl.setVisible(False)
+        v3.addWidget(self.time_lbl)
+        self._clock = QTimer(self, interval=1000, timeout=self._tick_clock)
+        self._t0 = 0.0
+        self._t_points: list[float] = []   # time of each finished point
         h = QHBoxLayout()
         self.save_btn = QPushButton("Save map…")
         self.save_btn.clicked.connect(self.save)
@@ -157,6 +168,7 @@ class AutoLevelPanel(QWidget):
             b.setEnabled(c.connected and not c.link.released and not self.running
                          and (not c.job_active or c.job_paused))
         self.touch_btn.setEnabled(c.connected and not self.running)
+        self.drift_btn.setEnabled(ready and c.position_valid and c.z_ref_xy is not None)
         self.start_btn.setEnabled(ready and c.position_valid)
         why = ""
         if self.running:
@@ -313,12 +325,62 @@ class AutoLevelPanel(QWidget):
                 self.win.bridge.event.emit("al_error", str(e))
 
         self._start_thread(work)
+        self._t0 = time.monotonic()
+        self._t_points = []
+        self.time_lbl.setVisible(True)
+        self._clock.start()
+        self._tick_clock()
         self.win.show_heightmap(self.hm)
+
+    @staticmethod
+    def _mmss(sec: float) -> str:
+        sec = int(max(sec, 0) + 0.5)
+        return f"{sec // 60}:{sec % 60:02d}"
+
+    def _tick_clock(self) -> None:
+        if not self.running and time.monotonic() - self._t0 > 2:
+            self._clock.stop()
+        hm = self.hm
+        el = time.monotonic() - self._t0
+        txt = f"⏱ {self._mmss(el)} elapsed"
+        if hm is not None:
+            total = hm.z.size + 1          # + closing re-probe of the first point
+            done = min(len(self._t_points), hm.z.size)
+            if done >= 2:
+                # average of the points so far (the first one has a longer travel)
+                per = (self._t_points[-1] - self._t_points[0]) / (done - 1)
+                txt += f" · about {self._mmss(per * (total - done))} left"
+            txt += f" · point {done} / {hm.z.size}"
+        self.time_lbl.setText(txt)
 
     def _start_thread(self, fn) -> None:
         self._thread = threading.Thread(target=fn, name="micropcb-autolevel", daemon=True)
         self._thread.start()
         self.refresh()
+
+    def check_drift(self, ask: bool = True) -> None:
+        """Touch the copper where Z 0 was set again (after a job)."""
+        if self.running or self.ctl.z_ref_xy is None:
+            return
+        if ask and QMessageBox.question(
+                self, "Z drift check",
+                "Check whether Z drifted during the job?\n\n"
+                "Put the probe clip on the copper, then press Yes. The tool goes back to "
+                "where Z 0 was set and touches the copper (should read 0.000).")                 != QMessageBox.Yes:
+            return
+        self._stop.clear()
+
+        def work():
+            try:
+                z = self.ctl.check_z_drift(clearance_mm=self.clear_mm.value(),
+                                           probe_spt=self.speed.value(), stop=self._stop)
+                self.win.bridge.event.emit("al_drift", z)
+            except ProbeCancelled:
+                self.win.bridge.event.emit("al_error", "Drift check stopped.")
+            except Exception as e:
+                self.win.bridge.event.emit("al_error", f"Drift check: {e}")
+
+        self._start_thread(work)
 
     def stop(self) -> None:
         self._stop.set()
@@ -328,11 +390,27 @@ class AutoLevelPanel(QWidget):
     def on_event(self, ev: str, payload) -> None:
         if ev == "al_point":
             i, j, z = payload
+            self._t_points.append(time.monotonic())
             self.win.log(f"Auto-level point X {self.hm.xs[i]:.2f} Y {self.hm.ys[j]:.2f}: "
                          f"{z:+.3f} mm")
             self._show_result()
             self.win.show_heightmap(self.hm)
         elif ev == "al_done":
+            self._clock.stop()
+            self.time_lbl.setText(f"⏱ Finished in {self._mmss(time.monotonic() - self._t0)}")
+            sus = self.hm.meta.get("suspect") or []
+            fixed = len(self.hm.meta.get("reprobed") or []) - len(sus)
+            if fixed > 0:
+                self.win.log(f"Auto-level: {fixed} point(s) re-probed because they were off "
+                             "their neighbours - corrected")
+            if sus:
+                pts = ", ".join(f"X {x:.1f} Y {y:.1f} ({r:+.3f} mm)" for x, y, r in sus)
+                self.win.log(f"⚠ auto-level: still off after re-probing: {pts}")
+                QMessageBox.warning(
+                    self, "Auto-level",
+                    "These points measured off their neighbours twice:\n\n" + pts +
+                    "\n\nCheck the board there (dirt, burr, chip, clip wire). The map is "
+                    "kept as measured - if the board is clean there, it is a real bump.")
             drift = float(self.hm.meta.get("drift_mm", 0.0))
             self.win.log(f"Auto-level finished - first point re-probed: {drift:+.3f} mm")
             self._show_result()
@@ -355,7 +433,28 @@ class AutoLevelPanel(QWidget):
                 txt += " Copper is now work Z 0."
             self.probe_lbl.setText(txt)
             self.win.log(f"Probe: Z {z:+.3f} mm, counter {value}" + (" -> Z zeroed" if zero else ""))
+        elif ev == "al_drift":
+            z = float(payload)
+            ok = abs(z) <= self.DRIFT_LIMIT
+            self.win.log(f"Z drift check at the Z 0 point: {z:+.3f} mm" +
+                         ("" if ok else " ⚠"))
+            self.probe_lbl.setText(
+                f"Z drift check: copper at <b>{z:+.3f} mm</b> where Z 0 was set" +
+                ("" if ok else " - <span style='color:#c62828'>Z drifted</span>"))
+            if ok:
+                QMessageBox.information(self, "Z drift check",
+                                        f"Copper at the Z 0 point: {z:+.3f} mm.\n\nNo drift.")
+            else:
+                QMessageBox.warning(
+                    self, "Z drift check",
+                    f"Copper at the Z 0 point now measures {z:+.3f} mm instead of 0.\n\n"
+                    + ("The tool ended LOWER than at the start (cuts got deeper during the "
+                       "job). " if z > 0 else
+                       "The tool ended HIGHER than at the start (cuts got shallower). ")
+                    + "Usual causes: bit slipping in the collet, Z losing steps, heat.\n"
+                    "Tighten the collet, do Probe + set Z 0 and record the next job.")
         elif ev == "al_error":
+            self._clock.stop()
             self.win.log(f"⚠ {payload}")
             self.probe_lbl.setText(f"<span style='color:#c62828'>{payload}</span>")
             if "stopped" not in str(payload).lower():

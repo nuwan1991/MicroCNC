@@ -27,7 +27,7 @@ from ..serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_LOST, EV_OVERLOAD,
 from ..settings import MachineState, Settings
 from ..sim_machine import SimMachine
 from ..toolpath import ERROR, Timeline, Toolpath, check_program
-from ..autolevel import apply_heightmap
+from ..autolevel import apply_heightmap, outside_map
 from .autolevel_panel import AutoLevelPanel
 from .cam_panel import CamPanel
 from .camera_panel import CameraPanel
@@ -832,6 +832,13 @@ class MainWindow(QMainWindow):
             msg += "\nSoft limits are OFF (machine home not set) - bounds are not checked."
         if prog.uses_spindle:
             msg += "\nThe spindle will switch on. Keep hands clear."
+        hm = self.al.active_map()
+        if hm is not None and self.job_prog_raw is not None:
+            out = outside_map(self.job_prog_raw, hm)
+            if out:
+                msg += ("\n\n⚠ The job is bigger than the height map: " + out + ".\n"
+                        "Outside the map the edge height is used - measure a bigger grid "
+                        "(Auto-level, From job).")
         if self.ctl.probed_since_job:
             msg += ("\n\n⚠ REMOVE THE PROBE CLIP from the board first. While the clip is on,\n"
                     "the machine stops going down as soon as the tool touches the copper,\n"
@@ -870,6 +877,8 @@ class MainWindow(QMainWindow):
         elif job.state == DONE:
             self._marker = None
             self.log(f"Job finished in {_hms(job.elapsed())}")
+            if self.ctl.z_ref_xy is not None and self.ctl.connected:
+                QTimer.singleShot(300, self.al.check_drift)
         elif job.state in (STOPPED, FAILED):
             self._marker = self.ctl.work_mm()
             self.log(f"Job stopped at line {job.line}: {job.message}")
@@ -937,6 +946,10 @@ class MainWindow(QMainWindow):
         self.ctl.program_transform = self._transformed if (hm or al) else None
         if hm is not None:
             self.log("Height map applied to the job")
+            if self.job_prog_raw is not None:
+                out = outside_map(self.job_prog_raw, hm)
+                if out:
+                    self.log(f"⚠ {out} - outside it the edge height is used")
         if al is not None:
             self.log(f"Camera alignment applied: {al.angle_deg:+.3f}°, "
                      f"X {al.tx:+.3f} Y {al.ty:+.3f} mm")

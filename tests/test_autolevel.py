@@ -4,7 +4,8 @@ import threading
 import numpy as np
 import pytest
 
-from micropcb.autolevel import HeightMap, apply_heightmap, make_grid, probe_order
+from micropcb.autolevel import (HeightMap, apply_heightmap, make_grid, outliers, outside_map,
+                                probe_order)
 from micropcb.controller import MachineController, ProbeCancelled, ProbeError
 from micropcb.gcode import parse
 from micropcb.settings import MachineState, Settings
@@ -206,5 +207,68 @@ def test_late_touch_report_trusts_machine_counter():
         # work Z must equal the real height of the tool above the copper
         real_mm = (c.sim.pos[2] - (-250)) * 0.004
         assert c.work_mm()[2] == pytest.approx(real_mm, abs=0.06)
+    finally:
+        c.disconnect()
+
+
+# ------------------------------------------------------------------ 0.2.2 additions
+def test_outliers_finds_single_bad_point_not_smooth_tilt():
+    xs, ys = np.arange(0, 40.1, 5.0), np.arange(0, 40.1, 5.0)
+    z = -0.011 * ys[:, None] + 0.001 * xs[None, :]        # real board: smooth tilt
+    hm = HeightMap(xs, ys, z.copy())
+    assert outliers(hm) == []
+    hm.z[3, 0] += 0.09                                    # dirt (map 6, 2026-11-15)
+    out = outliers(hm)
+    assert out[0][:2] == (0, 3) and out[0][2] == pytest.approx(0.09, abs=0.01)
+
+
+def test_outside_map_reports_job_bigger_than_map():
+    hm = HeightMap(np.array([-1.0, 41.0]), np.array([-1.0, 25.0]), np.zeros((2, 2)))
+    assert outside_map(parse("G0 Z1\nG1 Z-0.1 F50\nG1 X40 Y20\nG0 Z1"), hm) is None
+    msg = outside_map(parse("G0 Z1\nG1 Z-0.1 F50\nG1 X37 Y36.5\nG0 Z1"), hm)
+    assert msg and "36.5" in msg
+
+
+def test_autolevel_reprobes_dirty_point():
+    flat = -250
+    dirt = {"on": True}
+
+    def surface(x, y):
+        if dirt["on"] and abs(x - 10 * S) < 3 and abs(y - 10 * S) < 3:
+            return flat + 25          # 0.1 mm dirt, gone after the first touch
+        return flat
+
+    def on_point(i, j, z):
+        if (i, j) == (1, 1):
+            dirt["on"] = False
+
+    c = _ctl(surface)
+    try:
+        xs, ys = make_grid(0, 0, 20, 20, spacing=10)
+        hm = HeightMap.empty(xs, ys)
+        c.run_autolevel(hm, on_point=on_point)
+        assert np.allclose(hm.z, 0, atol=0.009)          # dirt value replaced
+        assert [1e3 * v for v in hm.meta["reprobed"][0][:2]] == [10e3, 10e3]
+        assert hm.meta["suspect"] == []
+    finally:
+        c.disconnect()
+
+
+def test_check_z_drift_after_board_moves():
+    level = {"z": -250}
+    c = _ctl(lambda x, y: level["z"])
+    try:
+        c.probe(5)
+        c.zero_axes("z")
+        c.jog("z", 2)
+        c.jog("x", 10)
+        c.jog("y", 5)
+        c.wait_idle(30)
+        assert c.check_z_drift() == pytest.approx(0, abs=0.009)
+        level["z"] -= 12              # copper now 0.048 mm lower than at Z 0
+        c.jog("x", 3)
+        c.wait_idle(30)
+        assert c.check_z_drift() == pytest.approx(-0.048, abs=0.009)
+        assert c.work_mm()[0] == pytest.approx(0, abs=0.005)
     finally:
         c.disconnect()

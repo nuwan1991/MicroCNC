@@ -18,7 +18,7 @@ import numpy as np
 
 from .gcode import Program, parse
 from .job import PAUSED_STATE, Job
-from .autolevel import HeightMap, probe_order
+from .autolevel import HeightMap, outliers, probe_order
 from .jog import jog_ticks, pack
 from .protocol import HEADER_JOG, Tick, encode_packet
 from .planner import Planner
@@ -180,6 +180,8 @@ class MachineController:
         for a in axes:
             i = AXES.index(a)
             self.state.work_offset[i] = p[i]
+        if "z" in axes:   # where Z 0 was set - used by check_z_drift after a job
+            self.z_ref_xy = (p[0], p[1])
         if self.link.position_valid:
             self._rezeroed = set()
         else:
@@ -476,6 +478,45 @@ class MachineController:
             self.wait_idle(30)
             if on_point is not None:
                 on_point(i, j, z)
+        # points far off their neighbours (dirt, burr): probe once more
+        hm.meta["reprobed"], hm.meta["suspect"] = [], []
+        done: set[tuple[int, int]] = set()
+        while len(done) < max(5, hm.z.size // 10):
+            # worst first, re-checked each time (a bad point also skews its neighbours)
+            cand = [o for o in outliers(hm) if (o[0], o[1]) not in done]
+            if not cand:
+                break
+            i, j, r = cand[0]
+            done.add((i, j))
+            if stop is not None and stop.is_set():
+                raise ProbeCancelled("auto-level cancelled")
+            x, y = float(hm.xs[i]), float(hm.ys[j])
+            self.probe_log.append(f"auto-level: X {x:.2f} Y {y:.2f} is {r:+.3f} mm off "
+                                  "its neighbours - probing it again")
+            wx, wy, wz = self.work_mm()
+            if wz < top + clearance_mm:
+                self.jog("z", top + clearance_mm - wz)
+            self.jog("x", x - wx)
+            self.jog("y", y - wy)
+            if not self.wait_idle(120):
+                raise RuntimeError("move did not finish")
+            old = float(hm.z[j, i])
+            travel = self.work_mm()[2] - (np.nanmin(hm.z) - extra_travel_mm)
+            hm.z[j, i] = z = self.probe(travel, probe_spt, stop)
+            self.jog("z", clearance_mm)
+            self.wait_idle(30)
+            left = [o for o in outliers(hm) if (o[0], o[1]) == (i, j)]
+            hm.meta["reprobed"].append([round(x, 3), round(y, 3), round(old, 4), round(z, 4)])
+            if left:
+                hm.meta["suspect"].append([round(x, 3), round(y, 3), round(left[0][2], 4)])
+                self.probe_log.append(f"auto-level: X {x:.2f} Y {y:.2f} again {z:+.3f} mm - "
+                                      "still off, check the board there")
+            else:
+                self.probe_log.append(f"auto-level: X {x:.2f} Y {y:.2f} now {z:+.3f} mm "
+                                      f"(was {old:+.3f}) - fixed")
+            top = max(top, z)
+            if on_point is not None:
+                on_point(i, j, z)
         # closing check: probe the first point again - it must still be Z 0.
         # Catches lost / not executed Z steps during the grid (hardware 2026-11-14).
         x, y = float(hm.xs[order[0][0]]), float(hm.ys[order[0][1]])
@@ -494,6 +535,32 @@ class MachineController:
                         "drift_mm": round(float(drift), 4),
                         "time": time.strftime("%Y-%m-%d %H:%M:%S")})
         return hm
+
+    z_ref_xy: tuple[int, int] | None = None   # machine X/Y steps of the last Z zero
+
+    def check_z_drift(self, clearance_mm: float = 2.0, travel_mm: float = 3.0,
+                      probe_spt: int = 14, stop: threading.Event | None = None) -> float:
+        """Go back to where Z 0 was set and touch it: returns the work Z of the
+        copper there (0.000 = no drift). Needs the probe clip on the copper.
+        Found 2026-11-15: Z ended 0.05 mm deeper after an 11 min job."""
+        if self.job_active:
+            raise RuntimeError("the job is still running")
+        self._require_ready()
+        if self.z_ref_xy is None:
+            raise RuntimeError("no Z zero set in this session - nothing to compare with")
+        wx, wy, wz = self.work_mm()
+        if wz < clearance_mm:
+            self.jog("z", clearance_mm - wz)
+        mx = self.settings.mm_per_step
+        p = self.link.position
+        self.jog("x", (self.z_ref_xy[0] - p[0]) * mx[0])
+        self.jog("y", (self.z_ref_xy[1] - p[1]) * mx[1])
+        if not self.wait_idle(120):
+            raise RuntimeError("move did not finish")
+        z = self.probe(self.work_mm()[2] + travel_mm, probe_spt, stop)
+        self.jog("z", clearance_mm)
+        self.wait_idle(30)
+        return z
 
     # ------------------------------------------------------------ jobs
     @property
