@@ -186,3 +186,21 @@ def test_gerber_records_tracks_and_pads():
                      "D10*\nX0Y0D02*\nX5000000Y0D01*\nD11*\nX1000000Y1000000D03*\nM02*\n")
     assert g.tracks and g.tracks[0][0] == pytest.approx(0.25)
     assert g.pads and g.pads[0][2] == pytest.approx(0.6)
+
+
+def test_variable_depth_by_gap():
+    pb = board(gap=0.15)                      # 0.15 gap: too narrow at 0.1 mm with a 30° bit
+    fixed = cam.isolation(pb, "top", VB, 0.12)
+    assert fixed.problem_area is not None
+    vary = cam.isolation(pb, "top", VB, 0.12, min_depth=0.04)
+    assert vary.problem_area is None
+    assert set(vary.path_depths) > {0.12}      # deep + at least one shallower level
+    assert min(vary.path_depths) < 0.12
+    assert any("Z-0.1200" in l for l in vary.lines)
+    # wide gaps only: all at the full depth
+    wide = cam.isolation(board(gap=1.0), "top", VB, 0.12, min_depth=0.04)
+    assert set(wide.path_depths) == {0.12}
+    # end mill: one depth, option ignored
+    em = cam.isolation(pb, "top", EM, 0.1, min_depth=0.04)
+    assert set(em.path_depths) == {0.1}
+    assert cam.depth_levels(VB, 0.12, 0.04) == [0.04, 0.0667, 0.0933, 0.12]

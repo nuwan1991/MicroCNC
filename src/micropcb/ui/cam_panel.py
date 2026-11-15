@@ -139,6 +139,17 @@ class CamPanel(QWidget):
         f.addRow("Overlap", self.iso_overlap)
         f.addRow("Extra gap", self.iso_extra)
         f.addRow(self.iso_climb)
+        self.iso_vary = QCheckBox("Variable depth by gap")
+        self.iso_vary.setToolTip("V-bit only. Cut at Depth where the gap allows and shallower\n"
+                                 "(narrower groove) only in narrow gaps, down to Min depth.\n"
+                                 "Tracks are never thinned: the groove edge stays on the copper.")
+        self.iso_min_depth = _d(0.01, 1, 0.04, 3, 0.01)
+        self.iso_min_depth.setToolTip("Shallowest cut in narrow gaps - must still cut through "
+                                      "the copper (35 um copper: 0.04 mm or more)")
+        self.iso_min_depth.setEnabled(False)
+        self.iso_vary.toggled.connect(self.iso_min_depth.setEnabled)
+        f.addRow(self.iso_vary)
+        f.addRow("Min depth", self.iso_min_depth)
         f.addRow(self.iso_width)
         self.iso_suggest = QPushButton("Suggest tool + depth…")
         self.iso_suggest.setToolTip("Measure the gaps between copper in the Gerber and pick the\n"
@@ -337,7 +348,9 @@ class CamPanel(QWidget):
         if iso:
             ops.append(cam.isolation(pb, side, self._tool(self.iso_tool), self.iso_depth.value(),
                                      self.iso_passes.value(), self.iso_overlap.value() / 100,
-                                     self.iso_extra.value(), self.iso_climb.isChecked(), safe))
+                                     self.iso_extra.value(), self.iso_climb.isChecked(), safe,
+                                     min_depth=(self.iso_min_depth.value()
+                                                if self.iso_vary.isChecked() else None)))
         if clear:
             ops += cam.clearing(pb, side, self._tool(self.clr_tool), self.clr_depth.value(),
                                 self.clr_overlap.value() / 100, self.clr_keep.value(),

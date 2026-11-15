@@ -29,6 +29,7 @@ class OpResult:
     paths: list[list[tuple[float, float]]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     problem_area: object = None                           # e.g. not-cleared copper gaps
+    path_depths: list = field(default_factory=list)       # isolation: depth of each path
 
     @property
     def empty(self) -> bool:
@@ -201,27 +202,9 @@ def recommend_isolation(copper, tools: list[Tool], min_depth: float = 0.04,
     return out, summary
 
 
-def isolation(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.08,
-              passes: int = 1, overlap: float = 0.3, extra: float = 0.0,
-              climb: bool = True, safe_z: float = 2.0, clip_to_outline: bool = True) -> OpResult:
-    copper = board.copper.get(side)
-    res = OpResult(f"Isolation {side}", tool)
-    if copper is None or copper.is_empty:
-        res.notes.append(f"no {side} copper")
-        return res
-    depth = -abs(depth)
-    w = tool.cut_width(depth)
-    if w <= 0:
-        raise ValueError("tool cut width is 0 - check V-bit tip / depth")
-    res.notes.append(f"cut width {w:.3f} mm at depth {depth:.3f}")
-    r = w / 2 + extra
-    bad = not_isolated(copper, r)
-    if not bad.is_empty:
-        res.problem_area = bad
-        res.notes.append(f"⚠ {len(as_polygons(bad))} place(s) too narrow for this tool "
-                         f"(gap < {2 * r:.3f} mm) - copper may stay connected there")
-    region = board.outline.buffer(w) if clip_to_outline and board.outline is not None \
-        and not board.outline.is_empty else None
+def _iso_paths(copper, w: float, extra: float, passes: int, overlap: float, climb: bool,
+               region) -> list[list[tuple[float, float]]]:
+    """Contours around the copper for a groove of width w (inner groove edge on the copper)."""
     paths = []
     for k in range(max(1, passes)):
         off = w / 2 + extra + k * w * (1 - overlap)
@@ -239,14 +222,103 @@ def isolation(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.08,
                         paths.extend(_lines(clipped))
                         continue
                 paths.append(pts)
-    paths = [p for p in paths if len(p) > 1]
+    return [p for p in paths if len(p) > 1]
+
+
+def _clip(paths, area, inside: bool):
+    """Parts of the paths inside (or outside) area."""
+    out = []
+    for p in paths:
+        ls = LineString(p)
+        g = ls.intersection(area) if inside else ls.difference(area)
+        if g.is_empty:
+            continue
+        if g.equals(ls):
+            out.append(p)
+        else:
+            out.extend(q for q in _lines(g) if len(q) > 1 and LineString(q).length > 0.02)
+    return out
+
+
+def depth_levels(tool: Tool, deep: float, shallow: float, step: float = 0.01,
+                 max_levels: int = 4) -> list[float]:
+    """Depths (positive mm, shallow -> deep) for variable-depth isolation."""
+    deep, shallow = abs(deep), min(abs(shallow), abs(deep))
+    if tool.kind != VBIT or deep - shallow < step / 2:
+        return [deep]
+    n = min(max_levels, int(round((deep - shallow) / step)) + 1)
+    return [round(shallow + (deep - shallow) * k / (n - 1), 4) for k in range(n)]
+
+
+def isolation(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.08,
+              passes: int = 1, overlap: float = 0.3, extra: float = 0.0,
+              climb: bool = True, safe_z: float = 2.0, clip_to_outline: bool = True,
+              min_depth: float | None = None) -> OpResult:
+    """Isolation contours. min_depth (V-bit only) = variable depth by gap: cut at
+    `depth` where the gap allows and only as shallow as min_depth in narrow gaps
+    (narrower groove). The groove's copper-side edge is on the copper at every
+    depth, so tracks are never thinned."""
+    copper = board.copper.get(side)
+    res = OpResult(f"Isolation {side}", tool)
+    if copper is None or copper.is_empty:
+        res.notes.append(f"no {side} copper")
+        return res
+    levels = depth_levels(tool, depth, min_depth) if min_depth is not None else [abs(depth)]
+    widths = [tool.cut_width(d) for d in levels]
+    if min(widths) <= 0:
+        raise ValueError("tool cut width is 0 - check V-bit tip / depth")
+    region = board.outline.buffer(max(widths)) if clip_to_outline and board.outline is not None \
+        and not board.outline.is_empty else None
+    if len(levels) == 1:
+        res.notes.append(f"cut width {widths[0]:.3f} mm at depth {-levels[0]:.3f}")
+    else:
+        res.notes.append(f"variable depth {levels[0]:.3f}-{levels[-1]:.3f} mm "
+                         f"(cut width {widths[0]:.3f}-{widths[-1]:.3f} mm)")
+    # zone_k: where level k cannot separate the copper (+ room for its passes)
+    zones = []
+    for d, w in zip(levels, widths):
+        bad = not_isolated(copper, w / 2 + extra)
+        zones.append(bad.buffer(w * (1.5 + max(1, passes)) + 0.3, quad_segs=8)
+                     if not bad.is_empty else Polygon())
+    bad0 = not_isolated(copper, widths[0] / 2 + extra)
+    if not bad0.is_empty:
+        res.problem_area = bad0
+        res.notes.append(f"⚠ {len(as_polygons(bad0))} place(s) too narrow for this tool "
+                         f"(gap < {2 * (widths[0] / 2 + extra):.3f} mm) - copper may stay "
+                         "connected there")
+    groups: list[tuple[float, list]] = []
+    n = len(levels)
+    for k in range(n - 1, -1, -1):           # deepest first
+        paths = _iso_paths(copper, widths[k], extra, passes, overlap, climb, region)
+        if n > 1:
+            if k == n - 1:
+                use = None if zones[k].is_empty else (zones[k], False)
+            else:
+                if zones[k + 1].is_empty:
+                    continue
+                area = zones[k + 1].buffer(0.3)  # a little overlap at the change
+                if k > 0 and not zones[k].is_empty:
+                    area = area.difference(zones[k])
+                use = (area, True)
+            if use is not None:
+                paths = _clip(paths, *use)
+        if paths:
+            groups.append((levels[k], paths))
+    if n > 1:
+        total = sum(LineString(p).length for _, ps in groups for p in ps) or 1
+        res.notes.append("depths: " + ", ".join(
+            f"{d:.3f} mm {100 * sum(LineString(p).length for p in ps) / total:.0f} %"
+            for d, ps in groups))
     W = _W(safe_z)
-    for p in _order(paths):
-        W.rapid_xy(*p[0])
-        W.plunge(depth, tool.plunge)
-        W.cut(p[1:], tool.feed)
+    res.paths, res.path_depths = [], []
+    for d, paths in groups:
+        for p in _order(paths):
+            W.rapid_xy(*p[0])
+            W.plunge(-d, tool.plunge)
+            W.cut(p[1:], tool.feed)
+            res.paths.append(p)
+            res.path_depths.append(d)
     W.lift()
-    res.paths = paths
     res.lines = W.out
     return res
 
