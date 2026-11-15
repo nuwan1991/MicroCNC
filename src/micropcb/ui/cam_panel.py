@@ -13,7 +13,7 @@ import re
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
                                QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
-                               QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+                               QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox, QPushButton, QSpinBox, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -99,6 +99,7 @@ class CamPanel(QWidget):
         self.lib = ToolLibrary.load()
         self.text: str | None = None
         self._last = None   # (placed board, ops, side, title, side_no) of the last Generate
+        self.problems = []  # [(op name, x, y, size)] places the tool cannot separate
         root = QVBoxLayout(self)
 
         top = QHBoxLayout()
@@ -139,6 +140,11 @@ class CamPanel(QWidget):
         f.addRow("Extra gap", self.iso_extra)
         f.addRow(self.iso_climb)
         f.addRow(self.iso_width)
+        self.iso_suggest = QPushButton("Suggest tool + depth…")
+        self.iso_suggest.setToolTip("Measure the gaps between copper in the Gerber and pick the\n"
+                                    "tool and depth that separate every track")
+        self.iso_suggest.clicked.connect(self.suggest_isolation)
+        f.addRow(self.iso_suggest)
         self.iso_tool.currentIndexChanged.connect(self._width)
         self.iso_depth.valueChanged.connect(self._width)
         row.addWidget(self.iso_on)
@@ -302,6 +308,7 @@ class CamPanel(QWidget):
         for b in (self.s1_btn, self.s2_btn):
             b.setEnabled(has and ds)
         self.save_btn.setEnabled(self.text is not None)
+        self.iso_suggest.setEnabled(has)
         self.export_btn.setEnabled(self.text is not None and bool(self._last))
         if has:
             pl = pcb.placement()
@@ -403,12 +410,76 @@ class CamPanel(QWidget):
         html.append(f"Tools in order: {' → '.join(tools)} ({max(len(tools) - 1, 0)} tool change(s))")
         self.notes.setText("<br>".join(html))
         self.win.pcb_view.set_problem(problem)
+        self.problems = [(o.name, x, y, size) for o in ops if o.problem_area is not None
+                         for x, y, size in cam.problem_spots(o.problem_area)]
         name = os.path.splitext(os.path.basename(pcb.source or "board"))[0]
         name += f"_{title.split()[0]}{side_no or ''}.nc".replace(" ", "_")
         self.win.load_job_text(self.text, name)
+        if hasattr(self.win, "set_ops"):
+            self.win.set_ops(ops, title, self.safe.value(), name)
         for line in html:
             self.win.log("  " + re.sub(r"<[^>]+>", "", line))
         self.refresh()
+
+    def suggest_isolation(self) -> None:
+        pcb = self.win.pcb
+        if pcb.board is None:
+            return
+        side = "bottom" if pcb.placement().mirror else "top"
+        copper = pcb.placed.copper.get(side)
+        if copper is None or copper.is_empty:
+            QMessageBox.information(self, "Suggest", f"No {side} copper.")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            advice, summary = cam.recommend_isolation(copper, self.lib.of_kind(VBIT, ENDMILL))
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.win.log(f"Isolation advice ({side}): {summary}")
+        for a in advice:
+            self.win.log(f"  {a.text}")
+        if not advice:
+            QMessageBox.information(self, "Suggest", summary)
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Isolation tool - {side} copper")
+        v = QVBoxLayout(dlg)
+        lbl = QLabel(summary + "\nCut width is kept at 90 % of the smallest gap; depth "
+                     "0.04-0.08 mm. Best first:")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        lst = QListWidget()
+        for a in advice:
+            it = QListWidgetItem(("✓ " if a.narrow == 0 else "⚠ ") + a.text)
+            if a.tool.kind == VBIT and a.tool.tip >= a.width * 0.999 and a.narrow:
+                it.setText(it.text() + " (tip alone is too wide)")
+            lst.addItem(it)
+        lst.setCurrentRow(0)
+        v.addWidget(lst, 1)
+        if advice[0].narrow:
+            w = QLabel("No tool in the library separates every track. Add a V-bit with a "
+                       "smaller tip (Tools…), or accept the red places on the Board view.")
+            w.setWordWrap(True)
+            w.setStyleSheet("color:#c62828")
+            v.addWidget(w)
+        bb = QDialogButtonBox(QDialogButtonBox.Apply | QDialogButtonBox.Close)
+        bb.button(QDialogButtonBox.Apply).setText("Apply to isolation")
+        bb.button(QDialogButtonBox.Apply).clicked.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lst.itemDoubleClicked.connect(lambda _: dlg.accept())
+        v.addWidget(bb)
+        dlg.resize(640, 320)
+        if dlg.exec() and lst.currentRow() >= 0:
+            self.apply_advice(advice[lst.currentRow()])
+
+    def apply_advice(self, a) -> None:
+        i = self.iso_tool.findData(a.tool.name)
+        if i >= 0:
+            self.iso_tool.setCurrentIndex(i)
+        self.iso_depth.setValue(a.depth)
+        self.iso_extra.setValue(0.0)
+        self.iso_on.setChecked(True)
+        self.win.log(f"Isolation set: {a.tool.label}, depth {a.depth:.3f} mm - Generate again")
 
     def save(self) -> None:
         if self.text is None:

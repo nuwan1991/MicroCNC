@@ -142,3 +142,25 @@ def test_combine_tool_changes_and_run_on_simulator():
         assert sim.pos[2] == 500        # ends at safe Z 2 mm
     finally:
         c.disconnect()
+
+
+def test_copper_gaps_and_recommendation():
+    pb = board(gap=0.2)
+    gaps = cam.copper_gaps(pb.copper["top"])
+    assert gaps[0] == pytest.approx(0.2, abs=0.01)
+    wide = Tool("V60", VBIT, 3.175, angle=60, tip=0.3)
+    adv, summary = cam.recommend_isolation(pb.copper["top"], [wide, VB, EM])
+    assert "0.200" in summary
+    best = adv[0]
+    assert best.tool is VB and best.narrow == 0
+    assert 0.04 <= best.depth <= 0.08 and best.width <= 0.9 * 0.2 + 1e-6
+    assert adv[-1].narrow > 0          # 0.3 tip / end mill cannot fit
+
+
+def test_problem_spots_listed():
+    pb = board(gap=0.1)
+    op = cam.isolation(pb, "top", VB, 0.1)
+    spots = cam.problem_spots(op.problem_area)
+    assert len(spots) == 1
+    x, y, _ = spots[0]
+    assert x == pytest.approx(6.05, abs=0.1) and y == pytest.approx(5, abs=0.1)

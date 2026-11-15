@@ -98,6 +98,13 @@ class PcbView(QWidget):
         self._cache = None
         self.update()
 
+    def zoom_to(self, x: float, y: float, size_mm: float = 4.0) -> None:
+        """Centre on (x, y) mm, about size_mm across."""
+        self._center = QPointF(x, y)
+        self._scale = 0.9 * min(max(self.width(), 1), max(self.height(), 1)) / max(size_mm, 0.5)
+        self._cache = None
+        self.update()
+
     def resizeEvent(self, e) -> None:  # noqa: N802
         super().resizeEvent(e)
         self.fit()

@@ -12,12 +12,14 @@ import time
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor
-from PySide6.QtWidgets import (QApplication, QLabel, QListWidget, QListWidgetItem,
-                               QMainWindow, QMessageBox, QPlainTextEdit, QScrollArea,
-                               QSplitter, QTabWidget, QWidget)
+from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QListWidget,
+                               QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSplitter, QTabWidget, QVBoxLayout,
+                               QWidget)
 
 from .. import __version__
 from ..gcode import GCodeError, parse
+from ..pcb import cam as pcbcam
 from ..planner import Planner
 from ..settings import Settings
 from ..toolpath import ERROR, Timeline, Toolpath, check_program
@@ -59,6 +61,8 @@ class CamWindow(QMainWindow):
         self.job_meta = None
         self.tp = None
         self.issues = []
+        self.ops = []            # last generated operations (for "Show")
+        self._ops_meta = None    # (title, safe_z, name)
 
         # ---- views (right)
         self.view_tabs = QTabWidget()
@@ -76,11 +80,32 @@ class CamWindow(QMainWindow):
         self.gcode_view.lineClicked.connect(lambda ln: self.select_line(ln, from_text=True))
         self.bottom_tabs.addTab(self.gcode_view, "G-code")
         self.checks_list = QListWidget()
-        self.checks_list.itemClicked.connect(lambda it: self.select_line(it.data(Qt.UserRole)))
+        self.checks_list.itemClicked.connect(self._check_clicked)
         self.bottom_tabs.addTab(self.checks_list, "Checks")
 
+        # "Show": all operations or one (per tool / side layer)
+        views = QWidget()
+        vl = QVBoxLayout(views)
+        vl.setContentsMargins(0, 0, 0, 0)
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("Show:"))
+        self.show_op = QComboBox()
+        self.show_op.setMinimumWidth(320)
+        self.show_op.addItem("All operations")
+        self.show_op.setEnabled(False)
+        self.show_op.setToolTip("Toolpath + G-code of one operation only (viewing - "
+                                "Save / Export always use the whole job)")
+        self.show_op.currentIndexChanged.connect(self._show_op)
+        bar.addWidget(self.show_op)
+        bar.addStretch(1)
+        clear = QPushButton("Clear console")
+        clear.clicked.connect(self.console.clear)
+        bar.addWidget(clear)
+        vl.addLayout(bar)
+        vl.addWidget(self.view_tabs, 1)
+
         right = QSplitter(Qt.Vertical)
-        right.addWidget(self.view_tabs)
+        right.addWidget(views)
         right.addWidget(self.bottom_tabs)
         right.setStretchFactor(0, 3)
         right.setStretchFactor(1, 1)
@@ -148,6 +173,9 @@ class CamWindow(QMainWindow):
         except (GCodeError, ValueError) as e:
             QMessageBox.warning(self, APP, f"Cannot show the G-code:\n{e}")
             return
+        self._set_job(text, path, prog)
+
+    def _set_job(self, text: str, path: str, prog) -> None:
         self.job_text, self.job_path, self.job_meta = text, path, None
         self.tp = Toolpath(prog)
         s = self.settings
@@ -175,21 +203,74 @@ class CamWindow(QMainWindow):
         self.view_tabs.setCurrentWidget(self.preview)
 
     # ------------------------------------------------------------------ views
+    def _spots(self):
+        """Places the isolation tool cannot separate (CAM panel), for the shown operation."""
+        spots = getattr(self.cam, "problems", [])
+        i = self.show_op.currentIndex()
+        if i > 0 and i - 1 < len(self.ops):
+            spots = [p for p in spots if p[0] == self.ops[i - 1].name]
+        return spots
+
     def _fill_checks(self) -> None:
         self.checks_list.clear()
-        if not self.issues:
+        spots = self._spots()
+        for name, x, y, size in spots:
+            it = QListWidgetItem(f"⚠  {name}: too narrow at X {x:.2f} Y {y:.2f} "
+                                 "- copper may stay connected (click to zoom)")
+            it.setData(Qt.UserRole, ("xy", x, y, size))
+            it.setForeground(QColor("#e65100"))
+            self.checks_list.addItem(it)
+        n = len(self.issues) + len(spots)
+        if not n:
             it = QListWidgetItem("✓ No problems found")
             it.setForeground(QColor("#2e7d32"))
             self.checks_list.addItem(it)
             self.bottom_tabs.setTabText(2, "Checks")
             return
+        self.bottom_tabs.setTabText(2, f"Checks ({n})")
         for i in self.issues:
             icon = "✖" if i.severity == ERROR else "⚠"
             it = QListWidgetItem(f"{icon}  line {i.line}: {i.text}")
             it.setData(Qt.UserRole, i.line)
             it.setForeground(QColor("#c62828" if i.severity == ERROR else "#e65100"))
             self.checks_list.addItem(it)
-        self.bottom_tabs.setTabText(2, f"Checks ({len(self.issues)})")
+
+    def _check_clicked(self, it) -> None:
+        d = it.data(Qt.UserRole)
+        if isinstance(d, (tuple, list)) and d and d[0] == "xy":
+            self.view_tabs.setCurrentWidget(self.pcb_view)
+            self.pcb_view.zoom_to(d[1], d[2], max(3.0, d[3] * 4))
+        else:
+            self.select_line(d)
+
+    def set_ops(self, ops, title: str, safe_z: float, name: str) -> None:
+        """Called by the CAM panel after Generate: fill the "Show" list."""
+        self.ops = [o for o in ops if not o.empty]
+        self._ops_meta = (title, safe_z, name)
+        self.show_op.blockSignals(True)
+        self.show_op.clear()
+        self.show_op.addItem(f"All operations ({title})")
+        for k, o in enumerate(self.ops, 1):
+            self.show_op.addItem(f"{k}. {o.name} - {o.tool.label}")
+        self.show_op.setCurrentIndex(0)
+        self.show_op.setEnabled(len(self.ops) > 1)
+        self.show_op.blockSignals(False)
+        self._full = (self.job_text, self.job_path)
+
+    def _show_op(self, i: int) -> None:
+        if not self._ops_meta:
+            return
+        title, safe, name = self._ops_meta
+        if i <= 0:
+            text, path = self._full
+        else:
+            o = self.ops[i - 1]
+            text = pcbcam.combine([o], f"{title}: {o.name}", safe)
+            path = name
+        meta = self.job_meta
+        self.load_job_text(text, path)
+        self.job_meta = meta
+        self.view_tabs.setCurrentWidget(self.preview)
 
     def select_line(self, line: int, from_text: bool = False) -> None:
         if not line or self.tp is None:

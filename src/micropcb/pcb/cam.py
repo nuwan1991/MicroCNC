@@ -137,6 +137,85 @@ def not_isolated(copper, r: float):
 
 
 
+def problem_spots(geom) -> list[tuple[float, float, float]]:
+    """Problem area -> [(x, y, size mm)], one per separate spot, left-to-right / front-to-back."""
+    out = []
+    for p in as_polygons(geom) if geom is not None else []:
+        c = p.centroid
+        x0, y0, x1, y1 = p.bounds
+        out.append((c.x, c.y, max(x1 - x0, y1 - y0)))
+    out.sort(key=lambda s: (round(s[1], 1), s[0]))
+    return out
+
+
+def copper_gaps(copper, look_mm: float = 1.0) -> list[float]:
+    """Smallest distance from each copper island to its nearest other island (mm),
+    only islands closer than look_mm. The design's isolation gaps."""
+    islands = as_polygons(copper)
+    if len(islands) < 2:
+        return []
+    tree = shapely.STRtree(islands)
+    a, b = tree.query(islands, predicate="dwithin", distance=look_mm)
+    keep = a < b
+    a, b = a[keep], b[keep]
+    if not len(a):
+        return []
+    g = list(islands)
+    d = shapely.distance([g[i] for i in a], [g[j] for j in b])
+    best: dict[int, float] = {}
+    for i, j, v in zip(a, b, d):
+        for k in (int(i), int(j)):
+            if v < best.get(k, 1e9):
+                best[k] = float(v)
+    return sorted(best.values())
+
+
+@dataclass
+class IsoAdvice:
+    tool: Tool
+    depth: float            # mm, positive
+    width: float            # cut width at that depth
+    narrow: int             # islands that still cannot be separated
+    text: str
+
+
+def recommend_isolation(copper, tools: list[Tool], min_depth: float = 0.04,
+                        max_depth: float = 0.08, margin: float = 0.9) -> tuple[list[IsoAdvice], str]:
+    """Best V-bit / end mill + depth for this copper.
+
+    Aim: the cut width is at most `margin` x the smallest design gap, so every
+    track is separated; depth at least `min_depth` (through the copper) and at
+    most `max_depth`. Sorted best first: fewest unseparated places, then the
+    deepest (most reliable) cut."""
+    gaps = copper_gaps(copper)
+    if not gaps:
+        return [], "No neighbouring copper found - any isolation tool works."
+    g_min = gaps[0]
+    g5 = gaps[max(0, len(gaps) // 20)]
+    target = margin * g_min
+    out = []
+    for t in tools:
+        if t.kind == VBIT:
+            tan = math.tan(math.radians(t.angle / 2)) or 1e-9
+            depth = (target - t.tip) / (2 * tan)
+            depth = min(max(depth, min_depth), max_depth)
+        elif t.kind == ENDMILL:
+            depth = min_depth
+        else:
+            continue
+        w = t.cut_width(depth)
+        narrow = sum(1 for g in gaps if g < w)
+        out.append(IsoAdvice(t, round(depth, 3), w, narrow, ""))
+    out.sort(key=lambda a: (a.narrow, -a.depth if a.narrow == 0 else a.width))
+    for a in out:
+        a.text = (f"{a.tool.label}: depth {a.depth:.3f} mm, cut width {a.width:.3f} mm - "
+                  + ("separates all tracks" if a.narrow == 0 else
+                     f"{a.narrow} island(s) still too close"))
+    summary = (f"Smallest gap between copper: {g_min:.3f} mm (5 % of gaps are below "
+               f"{g5:.3f} mm, {len(gaps)} islands measured).")
+    return out, summary
+
+
 def isolation(board: PlacedBoard, side: str, tool: Tool, depth: float = 0.08,
               passes: int = 1, overlap: float = 0.3, extra: float = 0.0,
               climb: bool = True, safe_z: float = 2.0, clip_to_outline: bool = True) -> OpResult:

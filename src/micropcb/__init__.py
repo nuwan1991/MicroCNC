@@ -1,3 +1,3 @@
 """MicroPCB - control software for Wegstr CNC machines."""
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"
