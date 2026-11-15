@@ -333,3 +333,23 @@ def test_job_cut_points():
     prog = parse("G0 X0 Y0 Z1\nG1 Z-0.1 F50\nG1 X10 F100\nG0 Z1\nG0 X20\n")
     pts = job_cut_points(prog, 1.0)
     assert len(pts) >= 11 and pts[:, 0].max() == pytest.approx(10)
+
+
+def test_shift_program_and_job_min():
+    from micropcb.gcode import job_min_xy, shift_program
+    prog = parse("G0 X-20 Y-15 Z1\nG1 Z-0.1 F50\nG1 X-5 Y-2 F100\nG0 Z1\n", (3.0, 4.0, 5.0))
+    assert job_min_xy(prog) == (-20, -15)
+    sp = shift_program(prog, 20, 15)
+    assert job_min_xy(sp) == (0, 0)
+    assert sp.lines()[0].start == (3.0, 4.0, 5.0)        # still starts where the machine is
+    assert sp.lines()[-1].end[:2] == (15, 13)
+
+
+def test_controller_runs_shifted_job():
+    c = _ctl(lambda x, y: -5000)
+    try:
+        c.job_shift = (20.0, 15.0)
+        prog = c.program_for_run("G0 X-20 Y-15 Z1\nG1 X-10 F100\n")
+        assert prog.lines()[-1].end[:2] == pytest.approx((10.0, 0.0))
+    finally:
+        c.disconnect()

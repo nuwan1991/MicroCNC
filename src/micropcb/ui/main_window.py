@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox,
 
 from .. import __version__
 from ..controller import AXES, EV_JOB, EV_STATE, MachineController
-from ..gcode import GCodeError, Program, parse
+from ..gcode import GCodeError, Program, job_min_xy, parse, shift_program
 from ..job import DONE, FAILED, PAUSED_STATE, PAUSING, RUNNING, STOPPED, STOPPING
 from ..protocol import TICK_SECONDS
 from ..serial_link import (EV_CONNECTED, EV_DISCONNECTED, EV_LOST, EV_OVERLOAD,
@@ -390,6 +390,20 @@ class MainWindow(QMainWindow):
         row.addWidget(self.job_bar, 1)
         row.addWidget(self.job_status)
         v.addLayout(row)
+        orow = QHBoxLayout()
+        orow.addWidget(QLabel("Job origin:"))
+        self.origin_combo = QComboBox()
+        self.origin_combo.addItem("As in the file", "file")
+        self.origin_combo.addItem("Front-left corner of the job = work 0", "corner")
+        self.origin_combo.setToolTip(
+            "Front-left: the job is shifted so its lowest X and Y are at work 0 -\n"
+            "zero X/Y on the board corner as usual. The file itself is not changed.")
+        self.origin_combo.setCurrentIndex(
+            max(0, self.origin_combo.findData(getattr(self.settings, "job_origin", "file"))))
+        self.origin_combo.currentIndexChanged.connect(self._origin_changed)
+        orow.addWidget(self.origin_combo)
+        orow.addStretch(1)
+        v.addLayout(orow)
         self.job_info = QLabel("No file loaded")
         self.job_info.setWordWrap(True)
         v.addWidget(self.job_info)
@@ -700,6 +714,7 @@ class MainWindow(QMainWindow):
         self.job_meta = None
         try:
             raw = parse(text, self._job_start())
+            raw = self._shift_job(raw)
             prog = self._transformed(raw)
         except (OSError, GCodeError, ValueError) as e:
             QMessageBox.warning(self, "Open G-code", f"Cannot load the file:\n{e}")
@@ -721,6 +736,27 @@ class MainWindow(QMainWindow):
                      "- see the Checks tab")
             self.bottom_tabs.setCurrentWidget(self.checks_list)
         self._refresh()
+
+    def _shift_job(self, raw: Program) -> Program:
+        """Apply the Job origin choice; sets ctl.job_shift for the real run."""
+        dx = dy = 0.0
+        lo = job_min_xy(raw)
+        if self.origin_combo.currentData() == "corner" and lo is not None:
+            dx, dy = -lo[0], -lo[1]
+        self.ctl.job_shift = (dx, dy)
+        if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+            self.log(f"  Job origin: moved by X {dx:+.3f} Y {dy:+.3f} mm "
+                     "(front-left corner of the job = work 0)")
+            return shift_program(raw, dx, dy)
+        self.ctl.job_shift = (0.0, 0.0)
+        return raw
+
+    def _origin_changed(self) -> None:
+        self.settings.job_origin = self.origin_combo.currentData()
+        if self.job_text is not None and not self.ctl.job_active:
+            meta = self.job_meta
+            self.load_job_text(self.job_text, self.job_path or "job.nc")
+            self.job_meta = meta
 
     def _set_program(self, prog: Program) -> None:
         """Toolpath, timeline, checks and views for a parsed program."""

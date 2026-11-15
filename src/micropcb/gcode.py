@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 ARC_TOLERANCE_MM = 0.005  # max chord error when splitting arcs
 
@@ -48,6 +48,34 @@ class Program:
 
     def lines(self) -> list[Move]:
         return [m for m in self.moves if m.kind == LINE]
+
+
+def job_min_xy(prog: Program) -> tuple[float, float] | None:
+    """Lowest X and Y the program moves to (end points; the start point is where
+    the machine happens to be, not part of the job)."""
+    pts = [m.end for m in prog.moves if m.kind == LINE]
+    if not pts:
+        return None
+    return min(p[0] for p in pts), min(p[1] for p in pts)
+
+
+def shift_program(prog: Program, dx: float, dy: float) -> Program:
+    """Program moved by dx, dy (work mm). The first move still starts where the
+    machine is."""
+    if not dx and not dy:
+        return prog
+    out = Program(warnings=list(prog.warnings), line_count=prog.line_count,
+                  max_feed=prog.max_feed)
+    first = True
+    for m in prog.moves:
+        if m.kind != LINE:
+            out.moves.append(m)
+            continue
+        s, e = m.start, m.end
+        start = s if first else (s[0] + dx, s[1] + dy, s[2])
+        first = False
+        out.moves.append(replace(m, start=start, end=(e[0] + dx, e[1] + dy, e[2])))
+    return out
 
 
 class GCodeError(ValueError):
