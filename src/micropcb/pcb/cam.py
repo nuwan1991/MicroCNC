@@ -150,24 +150,9 @@ def problem_spots(geom) -> list[tuple[float, float, float]]:
 
 def copper_gaps(copper, look_mm: float = 1.0) -> list[float]:
     """Smallest distance from each copper island to its nearest other island (mm),
-    only islands closer than look_mm. The design's isolation gaps."""
-    islands = as_polygons(copper)
-    if len(islands) < 2:
-        return []
-    tree = shapely.STRtree(islands)
-    a, b = tree.query(islands, predicate="dwithin", distance=look_mm)
-    keep = a < b
-    a, b = a[keep], b[keep]
-    if not len(a):
-        return []
-    g = list(islands)
-    d = shapely.distance([g[i] for i in a], [g[j] for j in b])
-    best: dict[int, float] = {}
-    for i, j, v in zip(a, b, d):
-        for k in (int(i), int(j)):
-            if v < best.get(k, 1e9):
-                best[k] = float(v)
-    return sorted(best.values())
+    only islands closer than look_mm. The design's isolation gaps, smallest first."""
+    from .drc import gap_spots
+    return [g[0] for g in gap_spots(copper, look_mm)]
 
 
 @dataclass

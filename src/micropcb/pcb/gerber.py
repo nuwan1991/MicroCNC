@@ -38,6 +38,8 @@ class GerberLayer:
     draws: int = 0
     regions: int = 0
     warnings: list = field(default_factory=list)
+    tracks: list = field(default_factory=list)   # [(width, x, y)] dark round-aperture draws
+    pads: list = field(default_factory=list)     # [(x, y, size)] dark flashes, size = smaller side
 
     @property
     def bounds(self):
@@ -265,6 +267,9 @@ class _Parser:
                 for k in range(len(coords) - 1)])
         if g is not None:
             self.add(g)
+            if self.dark and kind == "C" and self.cur in self.ap_size:
+                c = line.interpolate(0.5, normalized=True)
+                self.L.tracks.append((self.ap_size[self.cur], c.x, c.y))
         if self.path is None:
             self.path = [(self.x, self.y)]
         self.path.extend(pts)
@@ -415,6 +420,9 @@ class _Parser:
                 raise GerberError(f"flash with undefined aperture D{self.cur}")
             self.add(affinity.translate(ap, nx, ny))
             self.L.flashes += 1
+            if self.dark and not ap.is_empty:
+                x0, y0, x1, y1 = ap.bounds
+                self.L.pads.append((nx, ny, min(x1 - x0, y1 - y0)))
         self.x, self.y = nx, ny
 
     def _close_contour(self) -> None:

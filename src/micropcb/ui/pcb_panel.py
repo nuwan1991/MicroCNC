@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox,
                                QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QHeaderView, QLabel, QMessageBox, QPushButton, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
+from ..pcb import drc
 from ..pcb.board import ROLE_NAMES, ROLES, Board, Placement
 
 
@@ -81,7 +84,78 @@ class PcbPanel(QWidget):
         self.info.setTextFormat(Qt.RichText)
         self.info.setAlignment(Qt.AlignTop)
         v3.addWidget(self.info, 1)
+        self.check_btn = QPushButton("Board check…")
+        self.check_btn.setToolTip("Smallest clearance, track, pad, drill and annular ring in the "
+                                  "Gerber,\ncompared with the isolation tool")
+        self.check_btn.setEnabled(False)
+        self.check_btn.clicked.connect(self.board_check)
+        v3.addWidget(self.check_btn)
         root.addWidget(g3, 3)
+
+    # ------------------------------------------------------------ board check
+    def board_check(self) -> None:
+        if self.placed is None:
+            return
+        cam = getattr(self.win, "cam", None)
+        width, tool = None, ""
+        if cam is not None:
+            t = cam._tool(cam.iso_tool)
+            if t is not None:
+                width = t.cut_width(cam.iso_depth.value())
+                tool = f"{t.label} at {cam.iso_depth.value():.3f} mm"
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            pb = self.placed
+            rows = drc.board_check(pb, width)
+        finally:
+            QApplication.restoreOverrideCursor()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Board check")
+        dlg.setModal(False)
+        v = QVBoxLayout(dlg)
+        head = QLabel(("Isolation tool: " + tool + f" - cut width {width:.3f} mm.  "
+                       if width else "") + "Click a row to show the smallest one on the Board view.")
+        head.setWordWrap(True)
+        v.addWidget(head)
+        t = QTableWidget(len(rows), 5)
+        t.setHorizontalHeaderLabels(["Side", "Check", "Smallest", "Where (X, Y)", "Notes"])
+        t.setEditTriggers(QTableWidget.NoEditTriggers)
+        t.setSelectionBehavior(QTableWidget.SelectRows)
+        self.win.log("Board check:")
+        for r, row in enumerate(rows):
+            val = f"{row.value:.3f} mm" if row.value is not None else "-"
+            where = f"{row.x:.2f}, {row.y:.2f}" if row.x is not None else ""
+            cells = [row.side, row.what, val, where,
+                     (f"⚠ {row.note}" if row.bad else row.note)
+                     + (f" ({row.count} measured)" if row.count else "")]
+            for c, text in enumerate(cells):
+                it = QTableWidgetItem(text)
+                if row.bad:
+                    it.setForeground(QColor("#c62828"))
+                t.setItem(r, c, it)
+            self.win.log(f"  {row.side:6s} {row.what}: {val} at {where} {cells[4]}")
+        t.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        t.resizeColumnsToContents()
+
+        def show(r, _c=0):
+            row = rows[r]
+            if row.x is None:
+                return
+            if self.placed is not pb:     # placement changed since: positions moved
+                return
+            tabs = getattr(self.win, "view_tabs", None)
+            if tabs is not None and tabs.indexOf(self.view) >= 0:
+                tabs.setCurrentWidget(self.view)
+            self.view.zoom_to(row.x, row.y, 3.0)
+        t.cellClicked.connect(show)
+        v.addWidget(t, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(dlg.close)
+        v.addWidget(bb)
+        dlg.resize(900, 360)
+        dlg.show()
+        self._check_dlg = dlg
+        self._check_rows = rows
 
     # ------------------------------------------------------------ open
     def open_folder(self) -> None:
@@ -210,6 +284,7 @@ class PcbPanel(QWidget):
         self.view.set_board(self.placed, self._visible())
         self.view.set_problem(None)
         self._show_info()
+        self.check_btn.setEnabled(self.placed is not None)
         if hasattr(self.win, "cam"):
             self.win.cam.refresh()
         if hasattr(self.win, "camera"):

@@ -247,6 +247,15 @@ class Board:
         out.outline = tf(self.outline_polygon())
         for side in ("top", "bottom"):
             out.copper[side] = tf(self.copper(side))
+            tr, pd = [], []
+            for l in self.by_role(side):
+                if l.gerber is None:
+                    continue
+                for w, x, y in getattr(l.gerber, "tracks", []):
+                    tr.append((w, *pt(x, y)))
+                for x, y, s in getattr(l.gerber, "pads", []):
+                    pd.append((*pt(x, y), s))
+            out.tracks[side], out.pads[side] = tr, pd
         for l in self.by_role("other"):
             if l.gerber is not None and l.gerber.geometry is not None:
                 out.other.append((l.name, tf(l.gerber.geometry)))
@@ -270,6 +279,8 @@ class PlacedBoard:
     other: list = field(default_factory=list)
     holes: list = field(default_factory=list)
     slots: list = field(default_factory=list)
+    tracks: dict = field(default_factory=dict)   # side -> [(width, x, y)]
+    pads: dict = field(default_factory=dict)     # side -> [(x, y, size)]
 
     def fits(self, area_xy: tuple[float, float]) -> bool:
         return self.size[0] <= area_xy[0] + 1e-6 and self.size[1] <= area_xy[1] + 1e-6

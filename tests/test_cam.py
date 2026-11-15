@@ -164,3 +164,25 @@ def test_problem_spots_listed():
     assert len(spots) == 1
     x, y, _ = spots[0]
     assert x == pytest.approx(6.05, abs=0.1) and y == pytest.approx(5, abs=0.1)
+
+
+def test_board_check_rows():
+    from micropcb.pcb.drc import board_check
+    pb = board(gap=0.2)
+    pb.tracks = {"top": [(0.5, 15, 5)], "bottom": []}
+    pb.pads = {"top": [(5, 5, 2.0), (7.2, 5, 2.0)], "bottom": []}
+    rows = {r.what.split()[0]: r for r in board_check(pb, cut_width=0.3)}
+    assert rows["Clearance"].value == pytest.approx(0.2, abs=0.01) and rows["Clearance"].bad
+    assert rows["Clearance"].x == pytest.approx(6.1, abs=0.05)
+    assert rows["Track"].value == 0.5 and rows["Pad"].value == 2.0
+    assert rows["Drill"].value == 0.8
+    ring = rows["Annular"]
+    assert ring.value == pytest.approx(1.0 - 0.4, abs=0.02) and not ring.bad
+
+
+def test_gerber_records_tracks_and_pads():
+    from micropcb.pcb.gerber import parse_gerber
+    g = parse_gerber("%FSLAX26Y26*%\n%MOMM*%\n%ADD10C,0.25*%\n%ADD11R,1.0X0.6*%\n"
+                     "D10*\nX0Y0D02*\nX5000000Y0D01*\nD11*\nX1000000Y1000000D03*\nM02*\n")
+    assert g.tracks and g.tracks[0][0] == pytest.approx(0.25)
+    assert g.pads and g.pads[0][2] == pytest.approx(0.6)
