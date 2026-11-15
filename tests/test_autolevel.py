@@ -413,3 +413,19 @@ def test_old_maps_flagged_upside_down():
     hm.z[:] = 0.0
     hm.meta["counter_fixed"] = True
     assert not HeightMap.from_json(hm.to_json()).upside_down
+
+
+def test_first_probe_after_connect_clears_old_touch():
+    """Hardware 2026-11-15: app restarted while the machine still held a touch ->
+    Probe + set Z 0 sent Z- that the machine ignored and reported no touch."""
+    c = MachineController(Settings(), MachineState(), persist=False)
+    sim = SimMachine(realtime=False, surface=lambda x, y: -500, fw_z_offset=7000)
+    sim.latched = True                       # left over from the previous session
+    c.connect(transport=sim)
+    c.sim = sim
+    c.zero_axes()
+    try:
+        z = c.probe(5)
+        assert z == pytest.approx(-2.0, abs=0.06)
+    finally:
+        c.disconnect()

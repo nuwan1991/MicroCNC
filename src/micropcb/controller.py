@@ -129,6 +129,10 @@ class MachineController:
             return self.port or ""
         self.link = self._new_link()
         self.fw_z_offset = None  # machine may have been power-cycled
+        # The machine may still hold a touch from before (app restarted, tool left
+        # on the copper): it then refuses Z- but answers OK, so the first probe
+        # never touches (hardware 2026-11-15). Clear it before the first probe.
+        self._touch_latched = True
         if transport is not None:
             self.link.open(transport)
             self.port = getattr(transport, "port", "SIM")
