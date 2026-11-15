@@ -1,6 +1,6 @@
 (MicroPCB engraving resolution test 2)
 (tool: V-bit 20 deg, tip 0.1 mm, depth 0.04 mm -> cut width 0.114 mm)
-(work zero: front-left corner, Z0 on the copper; size SIZE_MM)
+(work zero: front-left corner, Z0 on the copper; size about 37 x 36 mm)
 G21 G90 G17
 G0 Z1
 M3

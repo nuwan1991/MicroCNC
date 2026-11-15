@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 from pathlib import Path
 
 
@@ -133,7 +134,10 @@ def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0,
             x += pitch + 3.5
         g.depth = depth
     g.out += [f"G0 Z{safe + 4:g}", "M5", "G0 X0 Y0", "M2"]
-    return "\n".join(g.out) + "\n"
+    text = "\n".join(g.out) + "\n"
+    xs = [float(v) for v in re.findall(r" X(-?[\d.]+)", text)]
+    ys = [float(v) for v in re.findall(r" Y(-?[\d.]+)", text)]
+    return text.replace("SIZE_MM", f"about {max(xs):.0f} x {max(ys):.0f} mm")
 
 
 def main() -> None:
