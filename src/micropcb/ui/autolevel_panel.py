@@ -84,7 +84,10 @@ class AutoLevelPanel(QWidget):
         self.from_job_btn.clicked.connect(self.area_from_job)
         f2.addRow(self.from_job_btn)
         self.spacing = _dspin(2, 100, 10, 1, 1)
-        self.margin = _dspin(0, 20, 1, 1, 0.5)
+        self.margin = _dspin(0, 20, 0, 1, 0.5)
+        self.margin.setToolTip("Extra distance around the area. Keep every probe point ON the "
+                               "copper:\noff the board the touch is wrong (map 7: the X -1 / "
+                               "Y -1 points read 0.02-0.06 mm high)")
         self.clear_mm = _dspin(0.2, 10, 1.0, 2, 0.1)
         self.first_mm = _dspin(0.5, 40, 5.0, 1, 0.5)
         self.speed = QSpinBox()
@@ -328,6 +331,16 @@ class AutoLevelPanel(QWidget):
     def _probe_here(self, zero: bool) -> None:
         if self.running:
             return
+        if not zero and not self.ctl.position_valid:
+            # 2026-11-15: after an unclean restart Probe here showed Z +10.2 mm -
+            # the Z position was the last saved one, not where the tool really was
+            QMessageBox.warning(
+                self, "Probe here",
+                "The Z position is not trusted (the program was closed without a normal "
+                "exit, the connection was lost or the motors were released), so a probe "
+                "here would show a wrong Z.\n\n"
+                "Jog to the board corner, Zero X and Zero Y, then use 'Probe + set Z 0'.")
+            return
         travel = self.first_mm.value()
         spt = self.speed.value()
         self._stop.clear()
@@ -359,6 +372,12 @@ class AutoLevelPanel(QWidget):
                f"• Tool above the board, not more than {self.first_mm.value():g} mm above it\n"
                "• The first point becomes work Z 0\n\n"
                "Keep a hand near E-STOP.")
+        prog = getattr(self.win, "job_prog_raw", None)
+        cb = cut_bounds(prog) if prog is not None else None
+        if cb is not None and (xs[0] < min(cb[0], 0) - 0.01 or ys[0] < min(cb[1], 0) - 0.01):
+            msg += ("\n\n⚠ Some probe points are left of / in front of work 0 "
+                    f"(X from {xs[0]:.2f}, Y from {ys[0]:.2f}). If work 0 is at the board edge "
+                    "they are off the copper and give wrong heights - set Margin 0.")
         if QMessageBox.question(self, "Auto-level", msg) != QMessageBox.Yes:
             return
         self.hm = HeightMap.empty(xs, ys)
