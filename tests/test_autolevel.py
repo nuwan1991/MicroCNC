@@ -360,3 +360,10 @@ def test_job_min_ignores_travel_moves():
     prog = parse("G0 X0 Y-30 Z2\nG0 X5 Y4\nG1 Z-0.05 F50\nG1 X9 Y6 F100\nG0 Z2\nG0 X0 Y-30\n",
                  (0.0, 0.0, 0.0))
     assert job_min_xy(prog) == (5, 4)
+
+
+def test_cut_bounds_ignores_start_and_travel():
+    from micropcb.gcode import cut_bounds
+    prog = parse("G0 X0 Y0 Z2\nG0 X5 Y4\nG1 Z-0.05 F50\nG1 X9 Y6 F100\nG0 Z2\nG0 X30 Y40\n",
+                 (-9.22, -3.0, 5.0))
+    assert cut_bounds(prog) == (5, 4, 9, 6)

@@ -50,6 +50,18 @@ class Program:
         return [m for m in self.moves if m.kind == LINE]
 
 
+def cut_bounds(prog: Program) -> tuple[float, float, float, float] | None:
+    """(x0, y0, x1, y1) of the cutting moves (tool below Z 0) - the area the job
+    really works in. None if it has no cuts."""
+    pts = [p for m in prog.moves if m.kind == LINE and not m.rapid
+           and min(m.start[2], m.end[2]) < 0 for p in (m.start, m.end) if p[2] < 0]
+    if not pts:
+        return None
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
 def job_min_xy(prog: Program) -> tuple[float, float] | None:
     """Lowest X and Y the program moves to (end points; the start point is where
     the machine happens to be, not part of the job)."""

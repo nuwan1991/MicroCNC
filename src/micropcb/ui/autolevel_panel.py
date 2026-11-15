@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayo
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
 from ..autolevel import AutoPlan, HeightMap, job_cut_points, make_grid
+from ..gcode import cut_bounds
 from ..controller import ProbeCancelled
 
 
@@ -253,12 +254,16 @@ class AutoLevelPanel(QWidget):
 
     def area_from_job(self) -> None:
         prog = self.win.job_prog_raw
-        b = prog.bounds() if prog is not None else None
+        # cutting moves only: the start move (from wherever the machine is) and
+        # travel moves would put probe points outside the board (2026-11-15)
+        b = cut_bounds(prog) if prog is not None else None
         if not b:
-            QMessageBox.information(self, "Auto-level", "Load a G-code file first.")
+            QMessageBox.information(self, "Auto-level", "Load a G-code file with cuts first.")
             return
-        for w, v in zip(self.area, (b[0][0], b[1][0], b[0][1], b[1][1])):
+        for w, v in zip(self.area, (b[0], b[2], b[1], b[3])):
             w.setValue(v)
+        self.win.log(f"Auto-level area = cut area of the job: X {b[0]:.2f} … {b[2]:.2f}, "
+                     f"Y {b[1]:.2f} … {b[3]:.2f} mm (+ margin {self.margin.value():g} mm)")
 
     # ------------------------------------------------------------ probe test
     TOUCH_TEST_SECONDS = 20
