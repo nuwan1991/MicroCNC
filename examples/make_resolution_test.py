@@ -1,5 +1,7 @@
 """Engraving resolution test: finds the smallest gap / trace / SMD pitch your
-bit + depth can make.  python examples/make_resolution_test.py [--tip 0.1 --angle 30 --depth 0.08]
+bit + depth can make.  python examples/make_resolution_test.py [--test 2 --tip 0.1 --angle 20 --depth 0.04]
+
+Test 2 (default) has finer steps around the test-1 result and a row D depth ladder.
 
 Writes examples/resolution-test.nc.  Work zero = front-left corner of the test
 area, Z 0 = copper (use Probe + set Z 0, auto-level recommended).  Size ~42 x 25 mm.
@@ -57,16 +59,28 @@ class G:
             self.line(x - 1.6, y + k * 0.6, x - 0.9, y + k * 0.6)
 
 
-def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0) -> str:
+TEST1 = dict(gaps=[1.0, 0.6, 0.4, 0.3, 0.25, 0.2, 0.15, 0.1],
+             traces=[0.6, 0.4, 0.3, 0.25, 0.2, 0.15],
+             pitches=[1.27, 1.0, 0.8, 0.65, 0.5], depths=None)
+# Test 2: test 1 kept groups 1-2 of every row, lost everything from group 3.
+# Finer steps around that limit, shallower cut, plus a depth ladder (row D).
+TEST2 = dict(gaps=[0.6, 0.5, 0.45, 0.4, 0.35, 0.3],
+             traces=[0.5, 0.45, 0.4, 0.35, 0.3],
+             pitches=[1.27, 1.1, 1.0, 0.9, 0.8],
+             depths=[0.02, 0.03, 0.04, 0.05, 0.06])
+
+
+def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0,
+          gaps=TEST1["gaps"], traces=TEST1["traces"], pitches=TEST1["pitches"],
+          depths=None, title="MicroPCB engraving resolution test") -> str:
     w = cut_width(tip, angle, depth)
     g = G(depth, feed, plunge, safe)
-    g.c("MicroPCB engraving resolution test")
+    g.c(title)
     g.c(f"tool: V-bit {angle:g} deg, tip {tip:g} mm, depth {depth:g} mm -> cut width {w:.3f} mm")
-    g.c("work zero: front-left corner, Z0 on the copper; size about 42 x 25 mm")
+    g.c("work zero: front-left corner, Z0 on the copper; size SIZE_MM")
     g.out += ["G21 G90 G17", f"G0 Z{safe:g}", "M3", "G4 P1"]
 
     # ---- row A: isolation gaps
-    gaps = [1.0, 0.6, 0.4, 0.3, 0.25, 0.2, 0.15, 0.1]
     x = 3.0
     g.c("ROW A - copper gap between two cuts (mm): " + ", ".join(f"{v:g}" for v in gaps))
     for n, gap in enumerate(gaps, 1):
@@ -78,7 +92,6 @@ def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0) ->
         x += pitch + 2.6
 
     # ---- row B: traces
-    traces = [0.6, 0.4, 0.3, 0.25, 0.2, 0.15]
     x = 3.0
     g.c("ROW B - trace width (mm): " + ", ".join(f"{v:g}" for v in traces))
     for n, tw in enumerate(traces, 1):
@@ -89,7 +102,6 @@ def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0) ->
         x += tw + w + 4.0
 
     # ---- row C: SMD pads (isolate each pad: outline at pad edge + w/2)
-    pitches = [1.27, 1.0, 0.8, 0.65, 0.5]
     y = 21.5
     g.c("ROW C - SMD pad pitch (mm): " + ", ".join(f"{v:g}" for v in pitches) +
         " ; pad width = pitch/2, length 1.6 mm")
@@ -105,6 +117,21 @@ def build(tip=0.1, angle=30.0, depth=0.08, feed=100.0, plunge=30.0, safe=1.0) ->
         x0 += 6 * p + 3.0
         if x0 > 38:
             x0, y = 3.0, y + 5.0
+    # ---- row D: depth ladder - same 0.5 mm gap pair cut at rising depths;
+    # the shallowest pair whose cuts go fully through the copper = depth to use.
+    if depths:
+        y = max(y + 5.0, 27.0)
+        x = 3.0
+        g.c("ROW D - cut depth (mm), 0.5 mm gap: " + ", ".join(f"{v:g}" for v in depths))
+        for n, d in enumerate(depths, 1):
+            g.depth = d
+            pitch = 0.5 + cut_width(tip, angle, d)
+            g.c(f"D{n}: depth {d:g} mm at X {x:.2f}")
+            g.ticks(x, y, n)
+            g.line(x, y, x, y + 5.0)
+            g.line(x + pitch, y + 5.0, x + pitch, y)
+            x += pitch + 3.5
+        g.depth = depth
     g.out += [f"G0 Z{safe + 4:g}", "M5", "G0 X0 Y0", "M2"]
     return "\n".join(g.out) + "\n"
 
@@ -113,12 +140,19 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--tip", type=float, default=0.1)
     ap.add_argument("--angle", type=float, default=30.0)
-    ap.add_argument("--depth", type=float, default=0.08)
+    ap.add_argument("--depth", type=float, default=None,
+                    help="cut depth (default 0.08 for test 1, 0.04 for test 2)")
+    ap.add_argument("--test", type=int, choices=(1, 2), default=2)
     ap.add_argument("--feed", type=float, default=100.0)
-    ap.add_argument("-o", default=str(Path(__file__).with_name("resolution-test.nc")))
+    ap.add_argument("-o", default=None)
     a = ap.parse_args()
-    Path(a.o).write_text(build(a.tip, a.angle, a.depth, a.feed), encoding="utf-8")
-    print(f"written {a.o}  (cut width {cut_width(a.tip, a.angle, a.depth):.3f} mm)")
+    t = TEST1 if a.test == 1 else TEST2
+    depth = a.depth if a.depth is not None else (0.08 if a.test == 1 else 0.04)
+    name = "resolution-test.nc" if a.test == 1 else "resolution-test-2.nc"
+    out = a.o or str(Path(__file__).with_name(name))
+    Path(out).write_text(build(a.tip, a.angle, depth, a.feed, title=
+        f"MicroPCB engraving resolution test {a.test}", **t), encoding="utf-8")
+    print(f"written {out}  (cut width {cut_width(a.tip, a.angle, depth):.3f} mm)")
 
 
 if __name__ == "__main__":
