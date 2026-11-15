@@ -1,6 +1,6 @@
 # Split into MicroPCB CAM + MicroPCB Control (design draft)
 
-Status: **design only – nothing built yet.** Written 2026-11-15 for MicroPCB 0.2.2.
+Status: **design agreed (section 10) – nothing built yet.** Written 2026-11-15 for MicroPCB 0.2.2.
 
 ## 1. Goal
 
@@ -166,12 +166,23 @@ working until phase 4.
 - Import boundaries (section 2).
 - Smoke tests: both windows open offscreen.
 
-## 10. Open questions (for the user)
+## 10. Decisions (user, 2026-11-15)
 
-1. Names: "MicroPCB CAM" and "MicroPCB Control" – OK?
-2. Should Control still be able to open Gerber files directly (calls CAM in the
-   background), or G-code only?
-3. One `.nc` per operation (current behaviour) or one combined file with tool
-   changes as the default export?
-4. Keep the all-in-one window permanently as a third option, or retire it in
-   phase 4?
+1. **Names:** "MicroPCB CAM" and "MicroPCB Control" – agreed.
+2. **Control opens G-code only.** No Gerber import in Control.
+3. **Export: one file per tool (standard way), combined file optional.**
+   - Default: one `.nc` per tool / operation (`top-isolation.nc`,
+     `drill-0.8.nc`, `cutout.nc` …), each with its own side file. This is what
+     FlatCAM, KiCad plugins and most CNC senders use: every file starts and
+     ends at a safe height, needs no tool-change support, and a single
+     operation can be re-run.
+   - The bit changes between files, so Control asks for **Probe + set Z 0 when
+     a file with a different tool is opened** (X/Y zero and the height map stay;
+     the map is relative to the first point, so it still fits after re-zeroing Z).
+   - Option "Combined file": one `.nc` with `M6 Tn` + `M0` pause at each tool
+     change (today's combine()). Control pauses, shows the next tool and asks
+     for Probe + set Z 0 before resuming.
+   - Export also writes `<board>-jobs.json`: the files in the right order
+     (isolation, drilling, holes, cutout), which Control shows as a job list.
+4. **All-in-one window is retired** after the real-machine test in phase 4. The
+   `micropcb` command then starts Control.
