@@ -47,6 +47,7 @@ class JobInfo:
     app: str = ""
     created: str = ""
     nc_sha1: str = ""
+    fine: list[tuple[float, float]] = field(default_factory=list)   # small-gap places (auto-level)
 
     # ------------------------------------------------------------------ json
     def to_dict(self) -> dict:
@@ -63,6 +64,7 @@ class JobInfo:
                         for ring in _limit(self.copper)],
              "expected": {"time_s": self.time_s,
                           "cut_area": list(self.cut_area) if self.cut_area else None},
+             "fine": [[round(x, 3), round(y, 3)] for x, y in self.fine],
              "nc_sha1": self.nc_sha1}
         return d
 
@@ -87,7 +89,8 @@ class JobInfo:
             time_s=exp.get("time_s"),
             cut_area=tuple(exp["cut_area"]) if exp.get("cut_area") else None,
             source=list(d.get("source") or []), app=d.get("app", ""),
-            created=d.get("created", ""), nc_sha1=d.get("nc_sha1", ""))
+            created=d.get("created", ""), nc_sha1=d.get("nc_sha1", ""),
+            fine=[tuple(p) for p in d.get("fine") or []])
 
     @property
     def holes(self) -> list[JobFeature]:

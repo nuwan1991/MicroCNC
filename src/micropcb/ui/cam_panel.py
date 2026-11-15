@@ -434,6 +434,13 @@ class CamPanel(QWidget):
             self.win.log("  " + re.sub(r"<[^>]+>", "", line))
         self.refresh()
 
+    def fine_spots(self):
+        """Small-gap places of the last Generate (for job-based auto-level points)."""
+        if not self._last:
+            return []
+        pb, ops, side, _, _ = self._last
+        return cam.fine_spots(pb, side, ops)
+
     def suggest_isolation(self) -> None:
         pcb = self.win.pcb
         if pcb.board is None:

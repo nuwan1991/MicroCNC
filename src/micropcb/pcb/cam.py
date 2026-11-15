@@ -634,13 +634,26 @@ def job_info(pb, ops: list[OpResult], side: str, source: list[str] | None = None
     xs = [p[0] for o in ops for path in o.paths for p in path]
     ys = [p[1] for o in ops for path in o.paths for p in path]
     pl = pb.placement
-    return JobInfo(
+    return JobInfo(fine=fine_spots(pb, side, ops),
         operation=kinds.pop() if len(kinds) == 1 else "combined",
         side=side, mirror_x_mm=(pb.size[0] / 2 + pl.margin) if pl.mirror else None,
         board_size=tuple(pb.size), outline=outline, tools=tools, features=feats,
         copper=copper_rings,
         cut_area=(min(xs), min(ys), max(xs), max(ys)) if xs else None,
         source=list(source or []), app=app)
+
+
+def fine_spots(pb, side: str, ops=(), limit_mm: float = 0.4) -> list[tuple[float, float]]:
+    """Places with fine detail (small copper gaps) where auto-level should probe densely:
+    gaps under limit_mm or under 1.5 x the isolation cut width."""
+    from .drc import gap_spots
+    copper = (getattr(pb, "copper", {}) or {}).get(side)
+    if copper is None or copper.is_empty:
+        return []
+    widths = [o.tool.cut_width(max(o.path_depths)) for o in ops
+              if op_kind(o) == "isolation" and o.path_depths]
+    lim = max([limit_mm] + [1.5 * w for w in widths])
+    return [(round(x, 3), round(y, 3)) for g, x, y in gap_spots(copper) if g < lim]
 
 
 def per_tool(ops: list[OpResult]) -> list[list[OpResult]]:

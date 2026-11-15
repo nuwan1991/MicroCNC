@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayo
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
-from ..autolevel import HeightMap, make_grid
+from ..autolevel import AutoPlan, HeightMap, job_cut_points, make_grid
 from ..controller import ProbeCancelled
 
 
@@ -97,10 +97,27 @@ class AutoLevelPanel(QWidget):
         f2.addRow("Clearance between points", self.clear_mm)
         f2.addRow("First probe max travel", self.first_mm)
         f2.addRow("Probe speed", self.speed)
+        self.job_pts = QCheckBox("Job-based points")
+        self.job_pts.setToolTip(
+            "Spacing = the fine grid. Probe a coarse grid (every N-th point) plus the fine\n"
+            "points near small gaps of the job; more fine points only where the board bends;\n"
+            "no fine points where the job does not cut. The rest is filled from the coarse grid.")
+        self.job_every = QSpinBox()
+        self.job_every.setRange(2, 6)
+        self.job_every.setValue(3)
+        self.job_every.setPrefix("coarse every ")
+        self.job_every.setEnabled(False)
+        self.job_pts.toggled.connect(self.job_every.setEnabled)
+        jr = QHBoxLayout()
+        jr.addWidget(self.job_pts)
+        jr.addWidget(self.job_every)
+        f2.addRow(jr)
         self.grid_lbl = QLabel()
+        self.grid_lbl.setWordWrap(True)
         f2.addRow(self.grid_lbl)
-        for w in self.area + [self.spacing, self.margin]:
+        for w in self.area + [self.spacing, self.margin, self.job_every]:
             w.valueChanged.connect(self._grid_changed)
+        self.job_pts.toggled.connect(lambda _: self._grid_changed())
         root.addWidget(g2)
 
         # ---- 3. run / result
@@ -185,7 +202,8 @@ class AutoLevelPanel(QWidget):
         self.why_lbl.setText(why)
         self.why_lbl.setVisible(bool(why))
         self.stop_btn.setEnabled(self.running)
-        for w in self.area + [self.spacing, self.margin, self.clear_mm, self.first_mm,
+        for w in self.area + [self.spacing, self.margin, self.job_pts, self.clear_mm,
+                              self.first_mm,
                               self.speed, self.from_job_btn, self.load_btn, self.clear_btn]:
             w.setEnabled(not self.running)
         done = self.hm is not None and self.hm.complete
@@ -199,10 +217,39 @@ class AutoLevelPanel(QWidget):
         return make_grid(min(a[0], a[1]), min(a[2], a[3]), max(a[0], a[1]), max(a[2], a[3]),
                          self.spacing.value(), self.margin.value())
 
+    def _fine(self):
+        """Small-gap places of the loaded job: side file, else the CAM panel's board."""
+        info = getattr(self.win, "job_meta", None)
+        if info is not None and getattr(info, "fine", None):
+            return list(info.fine)
+        cam = getattr(self.win, "cam", None)
+        if cam is not None and hasattr(cam, "fine_spots") and \
+                getattr(self.win, "job_text", None) is not None and cam.text == self.win.job_text:
+            return cam.fine_spots()
+        return []
+
+    def _plan(self, xs, ys):
+        if not self.job_pts.isChecked():
+            return None
+        prog = getattr(self.win, "job_prog_raw", None)
+        cuts = job_cut_points(prog) if prog is not None else None
+        return AutoPlan.build(xs, ys, cuts, self._fine(), self.job_every.value())
+
     def _grid_changed(self) -> None:
         xs, ys = self._grid()
         n = len(xs) * len(ys)
-        self.grid_lbl.setText(f"{len(xs)} × {len(ys)} = {n} points, about {n * 6 // 60 + 1} min")
+        plan = self._plan(xs, ys)
+        if plan is None:
+            self.grid_lbl.setText(f"{len(xs)} × {len(ys)} = {n} points, "
+                                  f"about {n * 6 // 60 + 1} min")
+            return
+        first, _ = plan.count()
+        fine = len(self._fine())
+        self.grid_lbl.setText(
+            f"{len(xs)} × {len(ys)} fine grid: about {first} of {n} points probed "
+            f"(about {first * 6 // 60 + 1} min) + more where the board bends. "
+            + (f"{fine} small-gap place(s) from the job." if fine else
+               "No small-gap data (open a G-code with its side file, or Generate in CAM)."))
 
     def area_from_job(self) -> None:
         prog = self.win.job_prog_raw
@@ -298,7 +345,11 @@ class AutoLevelPanel(QWidget):
         if self.running:
             return
         xs, ys = self._grid()
-        msg = (f"Probe {len(xs) * len(ys)} points?\n\n"
+        plan = self._plan(xs, ys)
+        self._total = plan.count()[0] if plan is not None else len(xs) * len(ys)
+        msg = ((f"Probe about {self._total} of {len(xs) * len(ys)} points (job-based, more "
+                "where the board bends)?\n\n") if plan is not None else
+               f"Probe {len(xs) * len(ys)} points?\n\n") + (
                "• Clip on the copper, spindle OFF\n"
                f"• Tool above the board, not more than {self.first_mm.value():g} mm above it\n"
                "• The first point becomes work Z 0\n\n"
@@ -316,7 +367,7 @@ class AutoLevelPanel(QWidget):
                 self.ctl.run_autolevel(
                     hm, clearance_mm=self.clear_mm.value(),
                     first_travel_mm=self.first_mm.value(), probe_spt=self.speed.value(),
-                    stop=self._stop,
+                    stop=self._stop, plan=plan,
                     on_point=lambda i, j, z: self.win.bridge.event.emit("al_point", (i, j, z)))
                 self.win.bridge.event.emit("al_done", None)
             except ProbeCancelled:
@@ -344,13 +395,14 @@ class AutoLevelPanel(QWidget):
         el = time.monotonic() - self._t0
         txt = f"⏱ {self._mmss(el)} elapsed"
         if hm is not None:
-            total = hm.z.size + 1          # + closing re-probe of the first point
-            done = min(len(self._t_points), hm.z.size)
+            n_pts = max(getattr(self, "_total", hm.z.size), len(self._t_points))
+            total = n_pts + 1              # + closing re-probe of the first point
+            done = min(len(self._t_points), n_pts)
             if done >= 2:
                 # average of the points so far (the first one has a longer travel)
                 per = (self._t_points[-1] - self._t_points[0]) / (done - 1)
                 txt += f" · about {self._mmss(per * (total - done))} left"
-            txt += f" · point {done} / {hm.z.size}"
+            txt += f" · point {done} / {n_pts}"
         self.time_lbl.setText(txt)
 
     def _start_thread(self, fn) -> None:

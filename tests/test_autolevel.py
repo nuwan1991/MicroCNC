@@ -272,3 +272,64 @@ def test_check_z_drift_after_board_moves():
         assert c.work_mm()[0] == pytest.approx(0, abs=0.005)
     finally:
         c.disconnect()
+
+
+# ------------------------------------------------------------------ job-based points (0.2.8)
+def test_autoplan_coarse_plus_fine_spots_and_cut_mask():
+    from micropcb.autolevel import AutoPlan
+    xs, ys = make_grid(0, 0, 30, 30, spacing=5)          # 7 x 7 fine grid
+    cuts = np.array([(x, 15.0) for x in np.linspace(0, 30, 61)])   # one cut line at Y 15
+    plan = AutoPlan.build(xs, ys, cuts, fine=[(10.0, 15.0)], every=3)
+    first, total = plan.count()
+    assert total == 49 and first < total
+    cx, cy = plan.coarse
+    assert list(cx) == [0, 3, 6]
+    assert plan.first[np.ix_(cy, cx)].all()
+    assert plan.first[3, 2]                     # fine spot (X 10, Y 15)
+    assert not plan.first[0, 1]                 # far from fine spots
+    assert not plan.need[0, 1] and plan.need[3, 1]    # Y 0 is 15 mm from any cut
+
+
+def test_autoplan_fill_and_bend_detection():
+    from micropcb.autolevel import AutoPlan
+    xs, ys = make_grid(0, 0, 30, 30, spacing=5)
+    plan = AutoPlan.build(xs, ys, None, every=3)
+    hm = HeightMap.empty(xs, ys)
+    cx, cy = plan.coarse
+    # flat board: coarse probed -> nothing more, the rest filled
+    hm.z[np.ix_(cy, cx)] = 0.0
+    assert plan.more(hm) == []
+    assert plan.fill(hm) == 49 - 9 and hm.complete
+    # bend at the centre coarse point: its neighbour cells get fine points
+    hm = HeightMap.empty(xs, ys)
+    hm.z[np.ix_(cy, cx)] = 0.0
+    hm.z[3, 3] = 0.05
+    more = plan.more(hm)
+    assert (2, 2) in more and (4, 4) in more and len(more) > 20
+
+
+def test_autolevel_job_based_run_probes_fewer_points():
+    from micropcb.autolevel import AutoPlan
+
+    def surface(x, y):                          # tilted plane: no bend
+        return round((-1.0 + 0.01 * x / S) * S)
+
+    c = _ctl(surface)
+    try:
+        xs, ys = make_grid(0, 0, 30, 30, spacing=5)
+        hm = HeightMap.empty(xs, ys)
+        plan = AutoPlan.build(xs, ys, None, every=3)
+        seen = []
+        c.run_autolevel(hm, plan=plan, on_point=lambda i, j, z: seen.append((i, j)))
+        assert hm.complete and len(seen) == 9
+        assert hm.meta["job_based"] and len(hm.meta["filled"]) == 40
+        assert hm.z[3, 6] == pytest.approx(0.3 * 1, abs=0.01)   # filled = plane
+    finally:
+        c.disconnect()
+
+
+def test_job_cut_points():
+    from micropcb.autolevel import job_cut_points
+    prog = parse("G0 X0 Y0 Z1\nG1 Z-0.1 F50\nG1 X10 F100\nG0 Z1\nG0 X20\n")
+    pts = job_cut_points(prog, 1.0)
+    assert len(pts) >= 11 and pts[:, 0].max() == pytest.approx(10)

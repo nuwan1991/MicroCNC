@@ -428,13 +428,17 @@ class MachineController:
     def run_autolevel(self, hm: HeightMap, *, clearance_mm: float = 1.0,
                       first_travel_mm: float = 5.0, extra_travel_mm: float = 1.0,
                       probe_spt: int = 14, stop: threading.Event | None = None,
-                      on_point: Callable[[int, int, float], None] | None = None) -> HeightMap:
+                      on_point: Callable[[int, int, float], None] | None = None,
+                      plan=None) -> HeightMap:
         """Probe every grid point (work X/Y) and fill hm.z (mm, first point = 0).
 
         Start with the tool at most first_travel_mm above the copper. Z is lifted
         by clearance_mm before EVERY sideways move, also the first one (the tool
         may be resting just above the copper after Probe + set Z 0).
         Work Z 0 is set to the copper at the first point.
+
+        plan (autolevel.AutoPlan): job-based points - probe only plan.first, then
+        plan.more(hm) where the board bends, and fill the rest (plan.fill).
         """
         if self.job_active:
             raise RuntimeError("stop the job before measuring a height map")
@@ -442,10 +446,28 @@ class MachineController:
         if not self.position_valid:
             raise RuntimeError("position is not reliable - set work zero first")
         order = probe_order(len(hm.xs), len(hm.ys))
+        if plan is not None:
+            order = [(i, j) for i, j in order if plan.first[j, i]]
         hm.z[:] = float("nan")
         top = 0.0  # highest surface measured so far (work mm)
         first_lift = 0.0
-        for n, (i, j) in enumerate(order):
+        extra_done = False
+        n = -1
+        while True:
+            n += 1
+            if n >= len(order):
+                if plan is None or extra_done:
+                    break
+                extra_done = True
+                more = plan.more(hm)
+                if not more:
+                    break
+                self.probe_log.append(f"auto-level: the board bends - {len(more)} more "
+                                      "point(s) there")
+                rank = {ij: k for k, ij in enumerate(probe_order(len(hm.xs), len(hm.ys)))}
+                order = order + sorted(more, key=lambda ij: rank[ij])
+                hm.meta["bend_points"] = len(more)
+            i, j = order[n]
             if stop is not None and stop.is_set():
                 raise ProbeCancelled("auto-level cancelled")
             x, y = float(hm.xs[i]), float(hm.ys[j])
@@ -478,6 +500,12 @@ class MachineController:
             self.wait_idle(30)
             if on_point is not None:
                 on_point(i, j, z)
+        if plan is not None:
+            probed = np.isfinite(hm.z).copy()
+            filled = plan.fill(hm)
+            hm.meta["job_based"] = True
+            self.probe_log.append(f"auto-level: {int(probed.sum())} point(s) probed, {filled} "
+                                  "filled in from the coarse grid (no fine detail there)")
         # points far off their neighbours (dirt, burr): probe once more
         hm.meta["reprobed"], hm.meta["suspect"] = [], []
         done: set[tuple[int, int]] = set()
