@@ -7,6 +7,14 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 
+def heightmap_dir(s: "Settings") -> Path:
+    """Folder for automatically saved height maps."""
+    d = Path(s.heightmap_dir) if s.heightmap_dir else \
+        Path.home() / "Documents" / "MicroPCB height maps"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def app_dir() -> Path:
     base = os.environ.get("APPDATA") or str(Path.home() / ".config")
     d = Path(base) / "MicroPCB"
@@ -35,6 +43,8 @@ class Settings:
     resume_restart_spindle: bool = True   # spindle off during pause: restart before going down
     jog_low_z_warning: bool = True        # ask before X/Y jog with the tool low
     jog_low_z_mm: float = 0.5             # "low" = work Z below this
+    autosave_heightmaps: bool = True      # save every finished auto-level run
+    heightmap_dir: str = ""               # "" = Documents/MicroPCB height maps
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

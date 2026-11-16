@@ -1,7 +1,7 @@
 # MicroPCB – safety features and checks
 
 Everything MicroPCB checks or does to protect the bit, the board and the machine,
-as of version 0.2.16. **Switch** = can be turned off in *Settings* (all are on
+as of version 0.2.17. **Switch** = can be turned off in *Settings* (all are on
 by default). Everything else is always on.
 
 ## 1. Before a job runs
@@ -103,3 +103,4 @@ by default). Everything else is always on.
 - Resume: spindle switched off during a pause – start it again before going down
 - Low tool warning (and its limit, default 0.5 mm)
 - Safe height (also used for resume and Go to work zero)
+- Height maps: save every finished auto-level map automatically (Documents\MicroPCB height maps; a map whose closing check failed is saved with -DRIFT in its name)

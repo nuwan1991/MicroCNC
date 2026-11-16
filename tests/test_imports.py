@@ -167,3 +167,29 @@ def test_run_part_buttons_from_simulation_bar():
     finally:
         w.settings.job_origin, w.settings.job_max_depth = keep
         w.close()
+
+
+def test_heightmap_autosave(tmp_path):
+    import os
+    from pathlib import Path
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import micropcb.ui.main_window as mw
+    from micropcb.autolevel import HeightMap
+    w = mw.MainWindow()
+    try:
+        hm = HeightMap.empty([0, 10], [0, 10])
+        hm.z[:] = 0.01
+        hm.meta.update(counter_fixed=True, drift_mm=0.002)
+        w.al.hm = hm
+        p = w.al.autosave()
+        assert p and Path(p).exists() and Path(p).parent.name == "MicroPCB height maps"
+        assert str(tmp_path) in p                        # not the user's Documents
+        assert HeightMap.from_json(Path(p).read_text(encoding="utf-8")).complete
+        hm.meta["drift_mm"] = 0.2
+        assert w.al.autosave().endswith("-DRIFT.hmap.json")
+        w.settings.autosave_heightmaps = False
+        assert w.al.autosave() is None
+    finally:
+        w.close()

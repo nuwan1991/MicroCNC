@@ -65,6 +65,11 @@ class SettingsDialog(QDialog):
         self.low_mm.setSuffix(" mm")
         form.addRow("Low tool warning", self._row([self.low_warn, self.low_mm]))
 
+        self.autosave = QCheckBox("Save every finished auto-level map automatically "
+                                  "(Documents\\MicroPCB height maps)")
+        self.autosave.setChecked(settings.autosave_heightmaps)
+        form.addRow("Height maps", self.autosave)
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
@@ -93,4 +98,5 @@ class SettingsDialog(QDialog):
         s.resume_restart_spindle = self.res_spin.isChecked()
         s.jog_low_z_warning = self.low_warn.isChecked()
         s.jog_low_z_mm = self.low_mm.value()
+        s.autosave_heightmaps = self.autosave.isChecked()
         self.accept()

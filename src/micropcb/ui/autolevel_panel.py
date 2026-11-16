@@ -470,6 +470,7 @@ class AutoLevelPanel(QWidget):
                     "kept as measured - if the board is clean there, it is a real bump.")
             drift = float(self.hm.meta.get("drift_mm", 0.0))
             self.win.log(f"Auto-level finished - first point re-probed: {drift:+.3f} mm")
+            self.autosave()
             self._show_result()
             if abs(drift) <= self.DRIFT_LIMIT:
                 self.apply_chk.setChecked(True)
@@ -541,6 +542,25 @@ class AutoLevelPanel(QWidget):
                 txt += ("<br><span style='color:#c62828'>Work X/Y zero changed since "
                         "measuring - the map no longer fits. Measure again.</span>")
         self.result_lbl.setText(txt)
+
+    def autosave(self) -> str | None:
+        """Save the finished map to the height map folder (Settings). Returns the path."""
+        if self.hm is None or not self.win.settings.autosave_heightmaps:
+            return None
+        from ..settings import heightmap_dir
+        try:
+            name = time.strftime("hmap-%Y%m%d-%H%M%S")
+            drift = float(self.hm.meta.get("drift_mm", 0.0))
+            if abs(drift) > self.DRIFT_LIMIT:
+                name += "-DRIFT"                 # closing check failed: do not use
+            path = str(heightmap_dir(self.win.settings) / f"{name}.hmap.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.hm.to_json())
+        except OSError as e:
+            self.win.log(f"⚠ height map not saved automatically: {e}")
+            return None
+        self.win.log(f"Height map saved automatically: {path}")
+        return path
 
     def save(self) -> None:
         if self.hm is None:
