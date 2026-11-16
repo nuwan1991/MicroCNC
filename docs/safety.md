@@ -1,6 +1,6 @@
-# MicroPCB – safety features and checks
+# MicroCNC – safety features and checks
 
-Everything MicroPCB checks or does to protect the bit, the board and the machine,
+Everything MicroCNC checks or does to protect the bit, the board and the machine,
 as of version 0.2.17. **Switch** = can be turned off in *Settings* (all are on
 by default). Everything else is always on.
 
@@ -31,12 +31,14 @@ by default). Everything else is always on.
 | With a height map: depths are checked below the *measured* copper, not below Z 0 | – |
 | Camera obstacles (clamps marked in the Camera tab) under the toolpath | ⚠ |
 
-## 3. Job options (job box, file on disk is never changed)
+## 3. Job options (per layer, in the Layers box; the file on disk is never changed)
 
 | Option | What it does |
 |---|---|
 | Job origin: front-left corner = work 0 | Shifts the job so its first cut is at work 0 (travel moves are ignored). |
-| Max cut depth | Cuts deeper than the limit are raised to it (V-bit: a deeper cut is a wider groove that eats thin tracks). Off for drill / cutout files. |
+| Max cut depth | Cuts deeper than the limit are raised to it (V-bit: a deeper cut is a wider groove that eats thin tracks). On by default for isolation layers, **off by default for drill, alignment and cutout layers**. |
+| Layer side | Each layer uses the height map of its own board side (Top / Bottom), so a bottom job never gets the top map. |
+| Job summary | Above Start: layer, file, max cut depth, height map and part to run - what Start will do. |
 | Height map (auto-level) | Added after the depth limit, so the depth stays the same below the copper everywhere. |
 | Run part (⟦ Start here / End here ⟧ on the simulation bar) | Runs only those G-code lines: Z up to the safe height, X/Y to the start, spindle on again (with spin-up) if it is on at that point of the job, down (the last part into the copper slowly), and at the end Z up to the safe height and spindle off. The Run question says "Only PART of the job". Another file = whole job again. |
 
@@ -64,6 +66,8 @@ by default). Everything else is always on.
 |---|---|
 | Low tool warning | **Switch:** *Low tool warning* (limit 0.5 mm). An X/Y jog (buttons or keyboard) with the tool below the limit asks first: *Cancel – I will lift Z* (default) or *Move anyway*. After *Move anyway* it is not asked again until Z has been above the limit. |
 | Soft limits | Jogs are clamped to the work area (when home is set); the console says so. |
+| Go to X / Y / Z | Z first goes up to the safe height, then X/Y move, Z goes to its value last; an empty box leaves that axis. A Z below work 0 asks first. Same soft limits as jogging. |
+| Spindle switch | The lamp and the word show the state (Running / Stopped); the switch is only the action. |
 | Jog blocked while a job runs | Only allowed when the job is paused. |
 | Keyboard jog | Only while the key is held; stops on release. Not active while typing in a field. |
 
@@ -83,7 +87,7 @@ by default). Everything else is always on.
 | Use job size | Uses only the cut area (no probe points outside the board from start / travel moves). |
 | Job-based points | Fewer points where nothing is fine; points added automatically where the board bends. |
 
-## 7. CAM (MicroPCB CAM)
+## 7. CAM (MicroCNC CAM)
 
 | Check | What happens |
 |---|---|

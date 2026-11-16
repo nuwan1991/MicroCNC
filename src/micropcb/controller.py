@@ -274,6 +274,25 @@ class MachineController:
             self.jog("y", -y)
         self.jog("z", -z)
 
+    def go_to(self, x: float | None = None, y: float | None = None,
+              z: float | None = None) -> None:
+        """Move to a work position; None = that axis stays. X/Y moves happen at safe
+        height (Z first goes up to max(Z, safe height)); Z goes to its value last."""
+        self._require_ready()
+        cx, cy, cz = self.work_mm()
+        moves_xy = (x is not None and abs(x - cx) > 1e-9) or                    (y is not None and abs(y - cy) > 1e-9)
+        if moves_xy:
+            safe = self.settings.safe_height_mm
+            if cz < safe:
+                self.jog("z", safe - cz)
+                cz = safe
+            if x is not None and abs(x - cx) > 1e-9:
+                self.jog("x", x - cx)
+            if y is not None and abs(y - cy) > 1e-9:
+                self.jog("y", y - cy)
+        if z is not None and abs(z - cz) > 1e-9:
+            self.jog("z", z - cz)
+
     def set_spindle(self, on: bool) -> None:
         self._require_ready()
         self.link.set_spindle(on)

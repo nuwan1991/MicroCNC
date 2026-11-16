@@ -1,6 +1,9 @@
-"""MicroPCB main window: connect, DRO, jog, zero, spindle, E-stop (1.2),
-G-code job with 2D preview, run / pause / stop (1.3),
-3D view, G-code viewer, job checks, playback, live job view (2.1-2.3)."""
+"""MicroCNC main window (0.3 layout).
+
+Rows: name + status / menus + E-STOP / port + view buttons. Left column (300 px):
+position, jog, spindle, job (summary + Start / Pause / Stop), layers. Right: the
+views with the simulation bar, and the bottom panel (console, G-code, checks,
+auto-level, PCB, CAM)."""
 from __future__ import annotations
 
 import os
@@ -9,15 +12,22 @@ import threading
 import time
 
 from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QFont, QKeySequence
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDoubleValidator, QFont, QKeySequence
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel,
                                QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
                                QSlider, QVBoxLayout, QWidget, QAbstractSpinBox,
                                QLineEdit, QFileDialog, QProgressBar, QSplitter,
-                               QTabWidget, QListWidget, QListWidgetItem, QScrollArea)
+                               QTabWidget, QListWidget, QListWidgetItem, QScrollArea,
+                               QFrame, QMenuBar, QSizePolicy)
 
-from .. import __version__
+from .. import APP_NAME, __version__
+from ..autolevel import HeightMap
+from ..layers import Layer, Project
+from . import theme
+from .help_dialogs import SHORTCUTS, AboutDialog, DocViewer, UpdateChecker, system_info
+from .layers_box import LayersBox
+from .widgets import Bracket, Lamp, Section, ToggleSwitch, muted
 from ..controller import AXES, EV_JOB, EV_STATE, MachineController
 from ..gcode import (GCodeError, Program, job_min_xy, limit_depth, parse, program_range,
                      shift_program)
@@ -42,7 +52,8 @@ from .preview import PreviewWidget
 from .settings_dialog import SettingsDialog
 
 SIM_LABEL = "Simulator (no machine)"
-STEP_SIZES = (0.01, 0.1, 1.0, 10.0)
+STEP_SIZES = (0.004, 0.01, 0.1, 1.0, 5.0, 10.0)   # 0.004 mm = one motor step
+DEFAULT_STEP = 3                                    # 1 mm
 
 # keyboard jog: key -> (axis, direction)
 JOG_KEYS = {
@@ -61,7 +72,7 @@ class Bridge(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"MicroPCB {__version__}")
+        self.setWindowTitle(f"{APP_NAME} {__version__}")
         self.settings = Settings.load()
         self.bridge = Bridge()
         self.bridge.event.connect(self._on_event, Qt.QueuedConnection)
@@ -84,6 +95,8 @@ class MainWindow(QMainWindow):
         self._play_t = 0.0
         self._marker = None
         self._sel_line = 0
+        self.layers: list[Layer] = []
+        self.updates = UpdateChecker(self)
 
         self._build_ui()
         self._build_menu()
@@ -97,173 +110,422 @@ class MainWindow(QMainWindow):
         self._refresh()
         if self.ctl.was_unclean:
             self.log("Last session did not close normally - position may be wrong.")
+        if self.settings.check_updates and not os.environ.get("MICROCNC_NO_UPDATE_CHECK") \
+                and not os.environ.get("PYTEST_CURRENT_TEST"):
+            QTimer.singleShot(4000, lambda: self.updates.check(manual=False))
 
     # ================================================================ UI
-    def _build_ui(self) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(6, 4, 6, 2)
-        root.setSpacing(4)
+    LEFT_W = 300   # left column (port, position, jog, spindle, job, layers)
 
-        # --- top bar
-        top = QHBoxLayout()
-        self.port_box = QComboBox()
-        self.port_box.setMinimumWidth(260)
-        refresh = QPushButton("⟳")
-        refresh.setToolTip("Refresh port list")
-        refresh.setFixedWidth(32)
-        refresh.clicked.connect(self.refresh_ports)
-        self.connect_btn = QPushButton("Connect")
-        self.connect_btn.clicked.connect(self.toggle_connect)
+    def _build_ui(self) -> None:
+        # --- rows 1 + 2: name / status, then menus + E-STOP (window top)
+        top = QWidget()
+        tv = QVBoxLayout(top)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
+        head = QWidget()
+        head.setStyleSheet(f"background:#0f1317; border-bottom:1px solid {theme.LINE};")
+        hh = QHBoxLayout(head)
+        hh.setContentsMargins(10, 4, 10, 4)
+        hh.setSpacing(14)
+        name = QLabel(f"{APP_NAME} {__version__}")
+        name.setStyleSheet("color:#fff; font-weight:700; font-size:10pt; border:none;")
+        name.setMinimumWidth(self.LEFT_W - 20)
+        hh.addWidget(name)
         self.status_lbl = QLabel()
-        self.status_lbl.setStyleSheet("font-weight: bold; padding: 0 10px;")
-        self.estop_btn = QPushButton("E-STOP  (Esc)")
-        self.estop_btn.setMinimumSize(150, 34)
-        self.estop_btn.setStyleSheet(
-            "QPushButton { background:#c62828; color:white; font-size:15px;"
-            " font-weight:bold; border-radius:6px; }"
-            "QPushButton:pressed { background:#8e0000; }")
+        hh.addWidget(self.status_lbl)
+        self.info_lbl = QLabel()
+        self.info_lbl.setStyleSheet(f"color:{theme.MUTE}; border:none;")
+        self.info_lbl.setTextFormat(Qt.RichText)
+        hh.addWidget(self.info_lbl, 1)
+        tv.addWidget(head)
+        self.menu_bar = QMenuBar()
+        self.estop_btn = QPushButton("■  E-STOP  (Esc)")
+        theme.set_role(self.estop_btn, "estop")
+        self.estop_btn.setFocusPolicy(Qt.NoFocus)
         self.estop_btn.setToolTip("Stop all motion and switch spindle off.\n"
                                   "The hardware E-stop cuts machine power.")
         self.estop_btn.clicked.connect(self.emergency_stop)
-        for w in (QLabel("Port:"), self.port_box, refresh, self.connect_btn, self.status_lbl):
-            top.addWidget(w)
-        top.addStretch(1)
-        top.addWidget(self.estop_btn)
-        root.addLayout(top)
+        mrow = QWidget()
+        mrow.setStyleSheet(f"background:{theme.PANEL}; border-bottom:1px solid {theme.LINE};")
+        mh = QHBoxLayout(mrow)
+        mh.setContentsMargins(4, 2, 8, 2)
+        mh.addWidget(self.menu_bar)
+        mh.addStretch(1)
+        mh.addWidget(self.estop_btn)
+        tv.addWidget(mrow)
+        self.setMenuWidget(top)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
         # --- warning banner
         self.banner = QLabel()
         self.banner.setWordWrap(True)
-        self.banner.setStyleSheet("background:#ffb300; color:black; padding:4px 8px;"
-                                  " font-weight:bold; border-radius:4px;")
+        self.banner.setStyleSheet("background:#d29922; color:black; padding:4px 10px;"
+                                  " font-weight:bold;")
         self.banner.hide()
         root.addWidget(self.banner)
 
         body = QHBoxLayout()
+        body.setSpacing(0)
         root.addLayout(body, 1)
-        left = QVBoxLayout()
-        body.addLayout(left, 0)
 
-        # --- DRO
-        dro = QGroupBox("Position (mm)")
-        g = QGridLayout(dro)
-        g.addWidget(QLabel("Work"), 0, 1, Qt.AlignRight)
-        g.addWidget(QLabel("Machine"), 0, 2, Qt.AlignRight)
-        big = QFont("Consolas", 22, QFont.Bold)
-        small = QFont("Consolas", 11)
+        # ================= left column
+        left_w = QWidget()
+        left = QVBoxLayout(left_w)
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(0)
+
+        # row 3 (left part): port, aligned with the view row on the right
+        port_row = QFrame()
+        port_row.setObjectName("section")
+        port_row.setFixedHeight(36)
+        pr = QHBoxLayout(port_row)
+        pr.setContentsMargins(10, 2, 10, 2)
+        pr.setSpacing(4)
+        pr.addWidget(muted("Port"))
+        self.port_box = QComboBox()
+        self.port_box.setMinimumWidth(60)
+        self.port_box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.port_box.setMinimumContentsLength(6)
+        pr.addWidget(self.port_box, 1)
+        refresh = QPushButton("⟳")
+        refresh.setToolTip("Refresh port list")
+        refresh.setFixedWidth(28)
+        refresh.clicked.connect(self.refresh_ports)
+        pr.addWidget(refresh)
+        self.connect_btn = QPushButton("Connect")
+        theme.set_role(self.connect_btn, "primary")
+        self.connect_btn.clicked.connect(self.toggle_connect)
+        pr.addWidget(self.connect_btn)
+        left.addWidget(port_row)
+
+        # --- Position
+        dro = Section("Position (mm)", muted("Work · Machine"))
+        g = QGridLayout()
+        g.setHorizontalSpacing(5)
+        g.setVerticalSpacing(3)
         self.work_lbl, self.mach_lbl = [], []
         for i, a in enumerate(AXES):
-            name = QLabel(a.upper())
-            name.setFont(big)
+            nm = QLabel(a.upper())
+            nm.setStyleSheet(f"color:{theme.AXIS[a]}; font-weight:700; font-size:12pt;")
             w = QLabel("0.000")
-            w.setFont(big)
-            w.setMinimumWidth(170)
+            w.setObjectName("dro")
             w.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             m = QLabel("0.000")
-            m.setFont(small)
-            m.setMinimumWidth(90)
+            m.setObjectName("droMachine")
+            m.setMinimumWidth(48)
             m.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            z = QPushButton(f"Zero {a.upper()}")
+            z = QPushButton("0")
+            z.setFixedWidth(28)
+            z.setToolTip(f"Zero {a.upper()}: this position becomes work {a.upper()} 0")
             z.clicked.connect(lambda _=False, ax=a: self._do(lambda: self.ctl.zero_axes(ax)))
-            g.addWidget(name, i + 1, 0)
-            g.addWidget(w, i + 1, 1)
-            g.addWidget(m, i + 1, 2)
-            g.addWidget(z, i + 1, 3)
+            g.addWidget(nm, i, 0)
+            g.addWidget(w, i, 1)
+            g.addWidget(m, i, 2)
+            g.addWidget(z, i, 3)
             self.work_lbl.append(w)
             self.mach_lbl.append(m)
-        row = QHBoxLayout()
-        self.zero_all_btn = QPushButton("Zero all")
+        g.addWidget(Bracket(), 0, 4, 3, 1)
+        self.zero_all_btn = QPushButton("Zero\nall")
+        self.zero_all_btn.setToolTip("Zero X, Y and Z: this position becomes work 0")
+        self.zero_all_btn.setStyleSheet(f"border-color:{theme.ACCENT}; padding:6px 4px;")
+        self.zero_all_btn.setFixedWidth(44)
         self.zero_all_btn.clicked.connect(lambda: self._do(self.ctl.zero_axes))
-        self.goto_zero_btn = QPushButton("Go to work zero")
-        self.goto_zero_btn.setToolTip("Raise Z to safe height, move X/Y to 0, lower Z to 0")
-        self.goto_zero_btn.clicked.connect(lambda: self._do(self.ctl.go_to_work_zero))
-        row.addWidget(self.zero_all_btn)
-        row.addWidget(self.goto_zero_btn)
-        g.addLayout(row, 4, 0, 1, 4)
+        g.addWidget(self.zero_all_btn, 0, 5, 3, 1, Qt.AlignVCenter)
+        g.setColumnStretch(1, 1)
+        dro.body.addLayout(g)
         left.addWidget(dro)
 
         # --- Jog
-        jog = QGroupBox("Jog")
-        jl = QVBoxLayout(jog)
+        self.kb_jog = QPushButton("⌨ Keys")
+        self.kb_jog.setCheckable(True)
+        self.kb_jog.setChecked(True)
+        self.kb_jog.setFocusPolicy(Qt.NoFocus)
+        self.kb_jog.setStyleSheet("padding:0 6px; font-size:8pt;")
+        self.kb_jog.setToolTip("Keyboard jog: hold arrows (X/Y) and PgUp/PgDn (Z) to move,\n"
+                               "release to stop")
+        jog = Section("Jog", self.kb_jog)
         steps = QHBoxLayout()
-        steps.addWidget(QLabel("Step (mm):"))
+        steps.setSpacing(3)
         self.step_group = QButtonGroup(self)
         for k, s in enumerate(STEP_SIZES):
             b = QPushButton(f"{s:g}")
             b.setCheckable(True)
-            b.setFixedWidth(52)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setStyleSheet("padding:3px 0;")
+            b.setMinimumWidth(10)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            b.setToolTip(f"Step {s:g} mm" + ("  (one motor step - the smallest move)"
+                                             if k == 0 else ""))
             self.step_group.addButton(b, k)
             steps.addWidget(b)
-        self.step_group.button(2).setChecked(True)
-        steps.addStretch(1)
-        jl.addLayout(steps)
+        self.step_group.button(DEFAULT_STEP).setChecked(True)
+        jog.body.addWidget(muted("Step (mm)"))
+        jog.body.addLayout(steps)
 
         pad = QGridLayout()
+        pad.setSpacing(4)
         tip_xy = ("Arrows show TOOL direction relative to the board.\n"
                   "The bed moves the opposite way.")
         tip_z = "Z+ moves the spindle UP, Z− moves it DOWN (towards the board)."
 
         def jbtn(text: str, axis: str, d: int) -> QPushButton:
             b = QPushButton(text)
-            b.setMinimumSize(64, 48)
-            b.setStyleSheet("font-size:15px; font-weight:bold;")
+            b.setFixedSize(46, 34)
+            b.setStyleSheet("font-weight:bold;")
+            b.setFocusPolicy(Qt.NoFocus)
             b.setToolTip(tip_z if axis == "z" else tip_xy)
-            b.setAutoRepeat(False)
             b.clicked.connect(lambda: self._step_jog(axis, d))
             return b
 
-        pad.addWidget(jbtn("Y+ ▲", "y", +1), 0, 1)
-        pad.addWidget(jbtn("◀ X−", "x", -1), 1, 0)
-        pad.addWidget(jbtn("X+ ▶", "x", +1), 1, 2)
-        pad.addWidget(jbtn("Y− ▼", "y", -1), 2, 1)
-        pad.addWidget(jbtn("Z+ ▲", "z", +1), 0, 4)
-        pad.addWidget(jbtn("Z− ▼", "z", -1), 2, 4)
+        pad.addWidget(jbtn("Y+", "y", +1), 0, 1)
+        pad.addWidget(jbtn("X−", "x", -1), 1, 0)
+        pad.addWidget(jbtn("X+", "x", +1), 1, 2)
+        pad.addWidget(jbtn("Y−", "y", -1), 2, 1)
+        pad.addWidget(jbtn("Z+", "z", +1), 0, 4)
+        pad.addWidget(jbtn("Z−", "z", -1), 2, 4)
         stop_btn = QPushButton("■")
+        theme.set_role(stop_btn, "stop")
         stop_btn.setToolTip("Stop motion")
-        stop_btn.setMinimumSize(64, 48)
+        stop_btn.setFixedSize(46, 34)
+        stop_btn.setFocusPolicy(Qt.NoFocus)
         stop_btn.clicked.connect(self.ctl.stop)
         pad.addWidget(stop_btn, 1, 1)
-        pad.setColumnMinimumWidth(3, 20)
-        jl.addLayout(pad)
+        pad.setColumnMinimumWidth(3, 12)
+        padw = QHBoxLayout()
+        padw.addStretch(1)
+        padw.addLayout(pad)
+        padw.addStretch(1)
+        jog.body.addLayout(padw)
+
+        row = QHBoxLayout()
+        self.goto_zero_btn = QPushButton("⌂ Go to work zero")
+        self.goto_zero_btn.setToolTip("Raise Z to safe height, move X/Y to 0, lower Z to 0")
+        self.goto_zero_btn.clicked.connect(lambda: self._do(self.ctl.go_to_work_zero))
+        self.safe_z_btn = QPushButton("⤒ Z safe height")
+        self.safe_z_btn.setToolTip("Raise Z to the safe height (Settings) - X/Y stay")
+        self.safe_z_btn.clicked.connect(self.z_to_safe)
+        for b in (self.goto_zero_btn, self.safe_z_btn):
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setMinimumWidth(10)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            row.addWidget(b)
+        jog.body.addLayout(row)
+
+        go = QHBoxLayout()
+        go.setSpacing(3)
+        self.goto_edits = []
+        for a in AXES:
+            lab = QLabel(a.upper())
+            lab.setStyleSheet(f"color:{theme.AXIS[a]}; font-weight:700;")
+            e = QLineEdit()
+            e.setPlaceholderText("—")
+            e.setMinimumWidth(20)
+            e.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            e.setValidator(QDoubleValidator(-1000.0, 1000.0, 3))
+            e.setToolTip(f"Work {a.upper()} to go to (mm). Empty = {a.upper()} stays.")
+            e.returnPressed.connect(self.go_to_position)
+            go.addWidget(lab)
+            go.addWidget(e, 1)
+            self.goto_edits.append(e)
+        self.goto_btn = QPushButton("Go to")
+        theme.set_role(self.goto_btn, "primary")
+        self.goto_btn.setToolTip("Move to the work position in the boxes (empty box = axis "
+                                 "stays).\nZ first goes up to the safe height, then X/Y move, "
+                                 "Z goes to its value last.")
+        self.goto_btn.clicked.connect(self.go_to_position)
+        go.addWidget(self.goto_btn)
+        jog.body.addLayout(go)
 
         sp = QHBoxLayout()
-        sp.addWidget(QLabel("Speed:"))
+        sp.addWidget(muted("Speed"))
         self.speed = QSlider(Qt.Horizontal)
-        self.speed.setRange(1, self.settings.max_steps_per_tick)
-        self.speed.setValue(min(self.settings.jog_steps_per_tick, self.settings.max_steps_per_tick))
+        self.speed.setRange(0, 100)
+        self.speed.setSingleStep(5)
+        self.speed.setPageStep(10)
+        self.speed.setValue(max(0, min(100, int(getattr(self.settings, "jog_speed_pct", 100)))))
         self.speed.setFocusPolicy(Qt.NoFocus)
+        self.speed.setToolTip("Jog speed, % of the machine's maximum (0 % = slowest move)")
         self.speed.valueChanged.connect(self._speed_changed)
         self.speed_lbl = QLabel()
-        self.speed_lbl.setMinimumWidth(90)
+        self.speed_lbl.setMinimumWidth(92)
+        self.speed_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         sp.addWidget(self.speed, 1)
         sp.addWidget(self.speed_lbl)
-        jl.addLayout(sp)
+        jog.body.addLayout(sp)
         self._speed_changed(self.speed.value())
-
-        kb = QHBoxLayout()
-        self.kb_jog = QCheckBox("Keyboard jog (arrows, PgUp/PgDn - hold to move)")
-        self.kb_jog.setChecked(True)
-        self.kb_jog.setFocusPolicy(Qt.NoFocus)
-        kb.addWidget(self.kb_jog)
-        jl.addLayout(kb)
         left.addWidget(jog)
 
-        # --- Spindle
-        spg = QGroupBox("Spindle")
-        sl = QHBoxLayout(spg)
-        self.spindle_btn = QPushButton("Spindle OFF")
-        self.spindle_btn.setCheckable(True)
-        self.spindle_btn.setMinimumHeight(40)
+        # --- Spindle: lamp + word = state, switch = action
+        spg = Section("Spindle")
+        sh = QHBoxLayout()
+        self.spindle_lamp = Lamp()
+        self.spindle_state = QLabel("Stopped")
+        self.spindle_state.setStyleSheet("font-weight:600;")
+        self.spindle_btn = ToggleSwitch()
+        self.spindle_btn.setToolTip("Slide right to start the spindle, left to stop it")
         self.spindle_btn.clicked.connect(self._spindle_clicked)
-        sl.addWidget(self.spindle_btn)
+        sh.addWidget(self.spindle_lamp)
+        sh.addWidget(self.spindle_state)
+        sh.addStretch(1)
+        sh.addWidget(muted("Off"))
+        sh.addWidget(self.spindle_btn)
+        sh.addWidget(muted("On"))
+        spg.body.addLayout(sh)
         left.addWidget(spg)
-        left.addStretch(1)
+
+        # --- Job: what Start will run, then Start / Pause / Stop
+        self.job_head = muted("")
+        jobs = Section("Job", self.job_head)
+        jobs.setStyleSheet("QFrame#section { background:#1a2129; }")
+        self.job_info = QLabel("No file loaded")
+        self.job_info.setObjectName("summary")
+        self.job_info.setWordWrap(True)
+        self.job_info.setTextFormat(Qt.RichText)
+        jobs.body.addWidget(self.job_info)
+        row = QHBoxLayout()
+        self.run_btn = QPushButton("▶ Start")
+        theme.set_role(self.run_btn, "start")
+        self.run_btn.setToolTip("Run the selected layer on the machine")
+        self.run_btn.clicked.connect(self.run_job)
+        self.pause_btn = QPushButton("⏸ Pause")
+        theme.set_role(self.pause_btn, "pause")
+        self.pause_btn.clicked.connect(self.pause_resume_job)
+        self.stopjob_btn = QPushButton("■ Stop")
+        theme.set_role(self.stopjob_btn, "stop")
+        self.stopjob_btn.clicked.connect(lambda: self._do(self.ctl.stop_job))
+        for b in (self.run_btn, self.pause_btn, self.stopjob_btn):
+            b.setMinimumHeight(32)
+            b.setMinimumWidth(10)
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            b.setFocusPolicy(Qt.NoFocus)
+            row.addWidget(b)
+        jobs.body.addLayout(row)
+        self.job_bar = QProgressBar()
+        self.job_bar.setRange(0, 1000)
+        self.job_bar.setTextVisible(False)
+        self.job_bar.setFixedHeight(6)
+        jobs.body.addWidget(self.job_bar)
+        self.job_status = muted("")
+        self.job_status.setWordWrap(True)
+        self.job_status.hide()
+        jobs.body.addWidget(self.job_status)
+        left.addWidget(jobs)
+
+        # --- Layers
+        self.layers_box = LayersBox()
+        lay = Section("Layers", self.layers_box.header_buttons())
+        lay.body.addWidget(self.layers_box, 1)
+        left.addWidget(lay, 1)
+        self.origin_combo = self.layers_box.origin_combo
+        self.depth_chk = self.layers_box.depth_chk
+        self.depth_spin = self.layers_box.depth_spin
+        self.origin_combo.setCurrentIndex(
+            max(0, self.origin_combo.findData(getattr(self.settings, "job_origin", "file"))))
+        md = float(getattr(self.settings, "job_max_depth", 0.0) or 0.0)
+        self.depth_spin.setValue(md or 0.05)
+        self.depth_chk.setChecked(md > 0)
+        self.depth_spin.setEnabled(md > 0)
+        self.layers_box.map_state = self._map_state
+        self.layers_box.selected.connect(self.select_layer)
+        self.layers_box.visibility.connect(self._update_layer_overlays)
+        self.layers_box.options.connect(self._layer_options_changed)
+        self.layers_box.add.connect(self.add_layers)
+        self.layers_box.remove.connect(self.remove_layer)
+
+        self.left_scroll = QScrollArea()
+        self.left_scroll.setWidget(left_w)
+        self.left_scroll.setWidgetResizable(True)
+        self.left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.left_scroll.setFixedWidth(self.LEFT_W)
+        left_w.setMaximumWidth(self.LEFT_W - 2)
+        for wdg in left_w.findChildren(QWidget):
+            if isinstance(wdg, (QLabel,)) and wdg.objectName() in ("summary",):
+                wdg.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.left_scroll.setStyleSheet(f"QScrollArea {{ background:{theme.PANEL};"
+                                       f" border-right:1px solid {theme.LINE}; }}")
+        left_w.setStyleSheet(f"background:{theme.PANEL};")
+        body.addWidget(self.left_scroll)
+
+        # ================= right: view row, views (+ simulation bar), bottom panel
+        right_w = QWidget()
+        rv = QVBoxLayout(right_w)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(0)
+        vrow = QFrame()
+        vrow.setObjectName("section")
+        vrow.setFixedHeight(36)
+        vh = QHBoxLayout(vrow)
+        vh.setContentsMargins(8, 2, 8, 2)
+        vh.setSpacing(4)
+        self.view_group = QButtonGroup(self)
+        self.view_btns: dict[str, QPushButton] = {}
+        for key, text in (("2d", "2D"), ("3d", "3D"), ("pcb", "PCB"), ("camera", "Camera")):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.NoFocus)
+            theme.set_role(b, "view")
+            b.clicked.connect(lambda _=False, k=key: self.show_view(k))
+            self.view_group.addButton(b)
+            self.view_btns[key] = b
+            vh.addWidget(b)
+        vh.addStretch(1)
+        self.tool_btns: dict[str, QPushButton] = {}
+        for key, text, tip in (("fit", "⤢ Fit", "Fit the job in the view (double-click works too)"),
+                               ("top", "Top", "3D: view from the top"),
+                               ("iso", "Iso", "3D: angled view"),
+                               ("map", "Map overlay", "Show the height map / auto-level points"),
+                               ("panel", "▾ Panel", "Show / hide the bottom panel (F6)"),
+                               ("full", "⛶", "Full-screen view: hide the side and bottom "
+                                             "panels (F11)")):
+            b = QPushButton(text)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.setToolTip(tip)
+            b.setStyleSheet("padding:2px 8px;")
+            if key in ("map", "panel", "full"):
+                b.setCheckable(True)
+            vh.addWidget(b)
+            self.tool_btns[key] = b
+        self.tool_btns["map"].setChecked(True)
+        self.tool_btns["panel"].setChecked(True)
+        self.tool_btns["fit"].clicked.connect(self.fit_view)
+        self.tool_btns["top"].clicked.connect(lambda: self.view3d and self.view3d.set_view("Top"))
+        self.tool_btns["iso"].clicked.connect(lambda: self.view3d and self.view3d.set_view("Iso"))
+        self.tool_btns["map"].toggled.connect(lambda _: self._refresh_map_overlay())
+        self.tool_btns["panel"].toggled.connect(self.set_bottom_visible)
+        self.tool_btns["full"].toggled.connect(self.set_full_view)
+        rv.addWidget(vrow)
+
+        right = QSplitter(Qt.Vertical)
+        right.setChildrenCollapsible(False)
+        self.vsplit = right
+        self.view_tabs = QTabWidget()
+        self.view_tabs.tabBar().hide()
+        self.view_tabs.setDocumentMode(True)
+        self.preview = PreviewWidget()
+        self.preview.lineClicked.connect(self.select_line)
+        self.view_tabs.addTab(self.preview, "2D")
+        self.view_tabs.currentChanged.connect(lambda _: self._sync_views())
+        self.view_tabs.currentChanged.connect(lambda _: self._sync_view_buttons())
+        self.view_tabs.currentChanged.connect(
+            lambda _: self._bottom_fitted and self._fit_bottom())
+        view_area = QWidget()
+        va = QVBoxLayout(view_area)
+        va.setContentsMargins(0, 0, 0, 0)
+        va.setSpacing(0)
+        va.addWidget(self.view_tabs, 1)
+        va.addWidget(self._build_sim_bar())
+        right.addWidget(view_area)
 
         # --- Console
         con = QWidget()
         cl = QVBoxLayout(con)
+        cl.setContentsMargins(4, 4, 4, 4)
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumBlockCount(3000)
@@ -280,7 +542,7 @@ class MainWindow(QMainWindow):
         self.rec_btn = QPushButton("● Record")
         self.rec_btn.setCheckable(True)
         self.rec_btn.setToolTip(
-            "Record every packet / reply with its time (µs) plus MicroPCB's own actions\n"
+            "Record every packet / reply with its time (µs) plus the program's own actions\n"
             "(zero, probes, auto-level, jobs) to a CSV in Documents\\MicroPCB captures.\n"
             "On stop a report and the motion as G-code are written - send them for analysis.")
         self.rec_btn.toggled.connect(self.toggle_record)
@@ -291,19 +553,8 @@ class MainWindow(QMainWindow):
             crow.addWidget(b)
         crow.addWidget(clear)
         cl.addLayout(crow)
-        right = QSplitter(Qt.Vertical)
-        right.setChildrenCollapsible(False)
-        self.vsplit = right
-        self.view_tabs = QTabWidget()
-        self.preview = PreviewWidget()
-        self.preview.lineClicked.connect(self.select_line)
-        self.view_tabs.addTab(self.preview, "2D")
-        self.view_tabs.currentChanged.connect(lambda _: self._sync_views())
-        self.view_tabs.currentChanged.connect(
-            lambda _: self._bottom_fitted and self._fit_bottom())
-        right.addWidget(self.view_tabs)
-        right.addWidget(self._build_job_panel())
         self.bottom_tabs = QTabWidget()
+        self.bottom_tabs.setDocumentMode(True)
         self.bottom_tabs.addTab(con, "Console")
         self.gcode_view = GCodeView()
         self.gcode_view.lineClicked.connect(lambda ln: self.select_line(ln, from_text=True))
@@ -313,11 +564,11 @@ class MainWindow(QMainWindow):
             lambda it: self.select_line(it.data(Qt.UserRole)))
         self.bottom_tabs.addTab(self.checks_list, "Checks")
         self.al = AutoLevelPanel(self)
-        al_scroll = QScrollArea()
-        al_scroll.setWidget(self.al)
-        al_scroll.setWidgetResizable(True)
-        al_scroll.setFrameShape(QScrollArea.NoFrame)
-        self.bottom_tabs.addTab(al_scroll, "Auto-level")
+        self.al_scroll = QScrollArea()
+        self.al_scroll.setWidget(self.al)
+        self.al_scroll.setWidgetResizable(True)
+        self.al_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.bottom_tabs.addTab(self.al_scroll, "Auto-level")
         self.pcb_view = PcbView()
         self.pcb = PcbPanel(self, self.pcb_view)
         pcb_scroll = QScrollArea()
@@ -333,11 +584,12 @@ class MainWindow(QMainWindow):
         self.bottom_tabs.addTab(cam_scroll, "CAM")
         right.addWidget(self.bottom_tabs)
         right.setStretchFactor(0, 5)
-        right.setStretchFactor(1, 0)
-        right.setStretchFactor(2, 1)
+        right.setStretchFactor(1, 1)
         self.bottom_tabs.currentChanged.connect(lambda _: self._fit_bottom())
+        self.bottom_tabs.currentChanged.connect(lambda _: self._bottom_tab_changed())
         self._bottom_fitted = False
-        body.addWidget(right, 1)
+        rv.addWidget(right, 1)
+        body.addWidget(right_w, 1)
         self._apply_quality()
         self.view_tabs.addTab(self.pcb_view, "PCB")
         # camera: picture with its controls in a side column (fits small screens)
@@ -356,114 +608,40 @@ class MainWindow(QMainWindow):
         cam_split.setChildrenCollapsible(False)
         self.camera_page = cam_split
         self.view_tabs.addTab(cam_split, "Camera")
+        self._sync_view_buttons()
 
-        self.home_lbl = QLabel()
-        self.statusBar().addPermanentWidget(self.home_lbl)
-        self.jog_widgets = [jog, self.zero_all_btn, self.goto_zero_btn, spg]
-        self.resize(1280, 860)
+        self.statusBar().hide()
+        self.jog_widgets = [jog, self.zero_all_btn, spg]
+        self.resize(1360, 900)
 
-    def _build_job_panel(self) -> QWidget:
-        box = QGroupBox("Job")
-        v = QVBoxLayout(box)
-        v.setContentsMargins(6, 2, 6, 4)
-        v.setSpacing(3)
-        row = QHBoxLayout()
-        self.open_btn = QPushButton("Open…")
-        self.open_btn.clicked.connect(self.open_job)
-        self.run_btn = QPushButton("▶ Run")
-        self.run_btn.clicked.connect(self.run_job)
-        self.pause_btn = QPushButton("⏸ Pause")
-        self.pause_btn.clicked.connect(self.pause_resume_job)
-        self.stopjob_btn = QPushButton("■ Stop")
-        self.stopjob_btn.clicked.connect(lambda: self._do(self.ctl.stop_job))
-        for b in (self.open_btn, self.run_btn, self.pause_btn, self.stopjob_btn):
-            b.setMinimumHeight(30)
-            b.setFocusPolicy(Qt.NoFocus)
-            row.addWidget(b)
-        self.run_btn.setStyleSheet("font-weight:bold;")
-        self.job_bar = QProgressBar()
-        self.job_bar.setRange(0, 1000)
-        self.job_bar.setTextVisible(False)
-        self.job_bar.setMaximumHeight(14)
-        self.job_status = QLabel()
-        self.job_status.setMinimumWidth(260)
-        row.addSpacing(8)
-        row.addWidget(self.job_bar, 1)
-        row.addWidget(self.job_status)
-        v.addLayout(row)
-        orow = QHBoxLayout()
-        orow.addWidget(QLabel("Job origin:"))
-        self.origin_combo = QComboBox()
-        self.origin_combo.addItem("As in the file", "file")
-        self.origin_combo.addItem("Front-left corner of the job = work 0", "corner")
-        self.origin_combo.setToolTip(
-            "Front-left: the job is shifted so its lowest X and Y are at work 0 -\n"
-            "zero X/Y on the board corner as usual. The file itself is not changed.")
-        self.origin_combo.setCurrentIndex(
-            max(0, self.origin_combo.findData(getattr(self.settings, "job_origin", "file"))))
-        self.origin_combo.currentIndexChanged.connect(self._origin_changed)
-        orow.addWidget(self.origin_combo)
-        orow.addSpacing(12)
-        self.depth_chk = QCheckBox("Max cut depth")
-        self.depth_chk.setToolTip(
-            "Cuts deeper than this are raised to it; shallower cuts stay as they are.\n"
-            "For engraving with a V-bit (a deeper cut is a wider groove that eats thin\n"
-            "tracks). Switch it OFF for drilling and board cutout files.\n"
-            "The file itself is not changed; the height map is added after this.")
-        self.depth_spin = QDoubleSpinBox()
-        self.depth_spin.setRange(0.01, 2.0)
-        self.depth_spin.setDecimals(3)
-        self.depth_spin.setSingleStep(0.01)
-        self.depth_spin.setSuffix(" mm")
-        md = float(getattr(self.settings, "job_max_depth", 0.0) or 0.0)
-        self.depth_spin.setValue(md or 0.05)
-        self.depth_chk.setChecked(md > 0)
-        self.depth_spin.setEnabled(md > 0)
-        self.depth_chk.toggled.connect(self.depth_spin.setEnabled)
-        self.depth_chk.toggled.connect(lambda _: self._origin_changed())
-        self.depth_spin.editingFinished.connect(self._origin_changed)
-        orow.addWidget(self.depth_chk)
-        orow.addWidget(self.depth_spin)
-        orow.addStretch(1)
-        v.addLayout(orow)
-        self.job_info = QLabel("No file loaded")
-        self.job_info.setWordWrap(True)
-        v.addWidget(self.job_info)
-
-        # playback (simulation of the job in the views, no machine motion)
-        pb = QHBoxLayout()
+    def _build_sim_bar(self) -> QWidget:
+        """Simulation (views only, no machine motion) + run part of the job."""
+        bar = QFrame()
+        bar.setObjectName("section")
+        bar.setStyleSheet(f"QFrame#section {{ background:{theme.PANEL};"
+                          f" border-top:1px solid {theme.LINE}; }}")
+        pb = QHBoxLayout(bar)
+        pb.setContentsMargins(8, 3, 8, 3)
+        pb.setSpacing(4)
         self.play_btn = QPushButton("▶ Simulate")
-        self.play_btn.setFocusPolicy(Qt.NoFocus)
         self.play_btn.setToolTip("Play the job in the views only - the machine does not move")
         self.play_btn.clicked.connect(self.toggle_playback)
         self.play_speed = QComboBox()
-        self.play_speed.setFocusPolicy(Qt.NoFocus)
         for k in (1, 5, 20, 100, 500):
             self.play_speed.addItem(f"{k}×", k)
         self.play_speed.setCurrentIndex(2)
         self.play_slider = QSlider(Qt.Horizontal)
-        self.play_slider.setFocusPolicy(Qt.NoFocus)
         self.play_slider.setRange(0, 0)
         self.play_slider.valueChanged.connect(self._slider_moved)
-        self.to_sel_btn = QPushButton("⇥ Selected line")
-        self.to_sel_btn.setFocusPolicy(Qt.NoFocus)
+        self.to_sel_btn = QPushButton("⇥ Line")
         self.to_sel_btn.setToolTip("Move the simulation to the selected G-code line")
         self.to_sel_btn.clicked.connect(self._play_to_selected)
         self.reset_play_btn = QPushButton("⟲")
-        self.reset_play_btn.setFocusPolicy(Qt.NoFocus)
         self.reset_play_btn.setToolTip("Reset simulation")
         self.reset_play_btn.clicked.connect(lambda: self._set_play_idx(0, stop=True))
         self.play_lbl = QLabel()
-        self.play_lbl.setMinimumWidth(150)
-        for w in (self.play_btn, self.play_speed):
-            pb.addWidget(w)
-        pb.addWidget(self.play_slider, 1)
-        for w in (self.play_lbl, self.to_sel_btn, self.reset_play_btn):
-            pb.addWidget(w)
-        v.addLayout(pb)
-
-        # run part of the job: start / end taken from the simulation position
-        rr = QHBoxLayout()
+        self.play_lbl.setMinimumWidth(96)
+        self.play_lbl.setStyleSheet("font-family:Consolas;")
         self.range_start_btn = QPushButton("⟦ Start here")
         self.range_start_btn.setToolTip("Run part of the job: it starts at the G-code line\n"
                                         "the simulation is on now (move the bar there)")
@@ -475,25 +653,31 @@ class MainWindow(QMainWindow):
         self.range_clear_btn = QPushButton("✕ Whole job")
         self.range_clear_btn.setToolTip("Run the whole job again")
         self.range_clear_btn.clicked.connect(self._clear_range)
-        for b in (self.range_start_btn, self.range_end_btn, self.range_clear_btn):
-            b.setFocusPolicy(Qt.NoFocus)
         self.range_lbl = QLabel("Run: whole job")
-        rr.addWidget(QLabel("Part:"))
-        for w in (self.range_start_btn, self.range_end_btn, self.range_clear_btn):
-            rr.addWidget(w)
-        rr.addWidget(self.range_lbl, 1)
-        v.addLayout(rr)
+        for w in (self.play_btn, self.play_speed, self.reset_play_btn):
+            w.setFocusPolicy(Qt.NoFocus)
+            pb.addWidget(w)
+        self.play_slider.setFocusPolicy(Qt.NoFocus)
+        pb.addWidget(self.play_slider, 1)
+        pb.addWidget(self.play_lbl)
+        for w in (self.to_sel_btn, self.range_start_btn, self.range_end_btn,
+                  self.range_clear_btn):
+            w.setFocusPolicy(Qt.NoFocus)
+            pb.addWidget(w)
+        pb.addWidget(self.range_lbl)
         self._range_pick = [None, None]
         self.play_timer = QTimer(self, interval=30, timeout=self._play_step)
-        return box
+        return bar
 
     # ---------------------------------------------------------------- layout
     def _fit_bottom(self) -> None:
-        """Give the bottom panel the height its current tab needs (max 60 %).
+        """Give the bottom panel the height its current tab needs (max 55 %).
 
         Console / G-code / Checks stay small so the views get the space;
-        Auto-level, PCB, CAM and Camera grow so their controls are not cut off.
+        Auto-level, PCB and CAM grow so their controls are not cut off.
         """
+        if not (not self.bottom_tabs.isHidden()):
+            return
         sizes = self.vsplit.sizes()
         total = sum(sizes)
         if total <= 0:
@@ -504,12 +688,11 @@ class MainWindow(QMainWindow):
         if inner is not None:
             need = max(inner.sizeHint().height(), inner.minimumSizeHint().height()) + bar + 12
         else:
-            need = 190
-        bottom = max(150, min(need, int(total * 0.6)))
+            need = 170
+        bottom = max(130, min(need, int(total * 0.55)))
         if self.view_tabs.currentWidget() is getattr(self, "camera_page", None):
-            bottom = 150          # camera picture + its side column get the room
-        job = sizes[1]
-        self.vsplit.setSizes([max(150, total - job - bottom), job, bottom])
+            bottom = 130          # camera picture + its side column get the room
+        self.vsplit.setSizes([max(150, total - bottom), bottom])
 
     def showEvent(self, e) -> None:  # noqa: N802
         super().showEvent(e)
@@ -517,67 +700,148 @@ class MainWindow(QMainWindow):
             self._bottom_fitted = True
             QTimer.singleShot(0, self._fit_bottom)
 
-    def _build_menu(self) -> None:
-        m = self.menuBar().addMenu("&File")
-        a = QAction("&Open G-code…", self)
-        a.setShortcut(QKeySequence.Open)
-        a.triggered.connect(self.open_job)
-        m.addAction(a)
-        a = QAction("&Reload file", self)
-        a.setShortcut("F5")
-        a.triggered.connect(lambda: self.load_job(self.job_path)
-                            if self.job_path and not self.ctl.job_active else None)
-        m.addAction(a)
-        a = QAction("Open &PCB board (Gerber / drill)…", self)
-        a.setShortcut("Ctrl+B")
-        a.triggered.connect(lambda: (self.bottom_tabs.setCurrentIndex(
-            self.bottom_tabs.count() - 1), self.pcb.open_folder()))
-        m.addAction(a)
-        m.addSeparator()
-        a = QAction("&Settings…", self)
-        a.triggered.connect(self.open_settings)
-        m.addAction(a)
-        m.addSeparator()
-        a = QAction("E&xit", self)
-        a.setShortcut(QKeySequence.Quit)
-        a.triggered.connect(self.close)
-        m.addAction(a)
+    def set_bottom_visible(self, on: bool) -> None:
+        self.bottom_tabs.setVisible(on)
+        if self.tool_btns["panel"].isChecked() != on:
+            self.tool_btns["panel"].setChecked(on)
+        if on:
+            QTimer.singleShot(0, self._fit_bottom)
 
-        m = self.menuBar().addMenu("&View")
+    def set_full_view(self, on: bool) -> None:
+        """Views only: hide the left column and the bottom panel (F11)."""
+        self.left_scroll.setVisible(not on)
+        self.set_bottom_visible(not on)
+        if self.tool_btns["full"].isChecked() != on:
+            self.tool_btns["full"].setChecked(on)
+
+    # ---------------------------------------------------------------- views row
+    def _view_widget(self, key: str):
+        return {"2d": self.preview, "3d": self.view3d, "pcb": getattr(self, "pcb_view", None),
+                "camera": getattr(self, "camera_page", None)}.get(key)
+
+    def show_view(self, key: str) -> None:
+        w = self._view_widget(key)
+        if w is not None and self.view_tabs.indexOf(w) >= 0:
+            self.view_tabs.setCurrentWidget(w)
+        self._sync_view_buttons()
+
+    def _sync_view_buttons(self) -> None:
+        if not hasattr(self, "view_btns"):
+            return
+        cur = self.view_tabs.currentWidget()
+        for key, b in self.view_btns.items():
+            w = self._view_widget(key)
+            shown = w is not None and self.view_tabs.indexOf(w) >= 0 and \
+                self.view_tabs.isTabVisible(self.view_tabs.indexOf(w))
+            b.setVisible(shown)
+            b.setChecked(w is cur and w is not None)
+        is3d = self.view3d is not None and cur is self.view3d
+        for k in ("top", "iso"):
+            self.tool_btns[k].setVisible(is3d)
+
+    def fit_view(self) -> None:
+        cur = self.view_tabs.currentWidget()
+        if cur is self.preview:
+            self.preview.fit()
+        elif self.view3d is not None and cur is self.view3d:
+            self.view3d.set_view(getattr(self.view3d, "_last_view", "Iso") or "Iso")
+        elif cur is getattr(self, "pcb_view", None):
+            self.pcb_view.fit()
+
+    def _bottom_tab_changed(self) -> None:
+        if self.bottom_tabs.currentWidget() is getattr(self, "al_scroll", None):
+            self.al.preview_plan()
+        self._refresh_map_overlay()
+
+    # ---------------------------------------------------------------- menus
+    def _build_menu(self) -> None:
+        mb = self.menu_bar
+
+        def act(menu, text, fn, shortcut=None):
+            a = QAction(text, self)
+            if shortcut:
+                a.setShortcut(shortcut)
+            a.triggered.connect(fn)
+            menu.addAction(a)
+            return a
+
+        m = mb.addMenu("&File")
+        act(m, "&New project", self.new_project)
+        act(m, "&Open project…", self.open_project, QKeySequence.Open)
+        act(m, "&Save project", self.save_project, QKeySequence.Save)
+        act(m, "Save project &as…", lambda: self.save_project(ask=True))
+        m.addSeparator()
+        act(m, "Add G-code &layer(s)…", self.add_layers, "Ctrl+L")
+        act(m, "&Reload layers", self.reload_layers, "F5")
+        act(m, "Open &PCB board (Gerber / drill)…", lambda: (self.bottom_tabs.setCurrentIndex(
+            self.bottom_tabs.indexOf(self.pcb.parentWidget().parentWidget())),
+            self.pcb.open_folder()), "Ctrl+B")
+        m.addSeparator()
+        act(m, "Open &height map…", lambda: (self._show_al_tab(), self.al.load()))
+        act(m, "Sa&ve height map…", lambda: (self._show_al_tab(), self.al.save()))
+        m.addSeparator()
+        act(m, "Open &captures folder", self.open_capture_folder)
+        m.addSeparator()
+        act(m, "E&xit", self.close, QKeySequence.Quit)
+
+        m = mb.addMenu("&View")
+        for key, text, sc in (("2d", "&2D view", "Ctrl+1"), ("3d", "&3D view", "Ctrl+2"),
+                              ("pcb", "&PCB view", "Ctrl+3"), ("camera", "&Camera", "Ctrl+4")):
+            act(m, text, lambda _=False, k=key: self.show_view(k), sc)
+        m.addSeparator()
+        act(m, "Show / hide &bottom panel", lambda: self.set_bottom_visible(
+            not (not self.bottom_tabs.isHidden())), "F6")
+        act(m, "&Full-screen view", lambda: self.set_full_view(
+            not self.tool_btns["full"].isChecked()), "F11")
+        act(m, "Fi&t to job", self.fit_view)
+        m.addSeparator()
         grp = QActionGroup(self)
         for key, text in (("full", "3D quality: &Standard"),
                           ("light", "3D quality: &Light (built-in graphics / big files)"),
-                          ("2d", "&2D only (no 3D view)")):
+                          ("2d", "2D &only (no 3D view)")):
             a = QAction(text, self, checkable=True)
             a.setChecked(self.settings.view_quality == key)
             a.triggered.connect(lambda _=False, k=key: self.set_quality(k))
             grp.addAction(a)
             m.addAction(a)
 
-        m = self.menuBar().addMenu("&Machine")
-        a = QAction("Set machine &home here…", self)
-        a.triggered.connect(self.set_home)
-        m.addAction(a)
+        m = mb.addMenu("&Settings")
+        act(m, "&Preferences…", self.open_settings, "Ctrl+,")
+        act(m, "&Safety switches…", self.open_settings)
+        m.addSeparator()
+        h = m.addAction("Machine")
+        h.setEnabled(False)
+        act(m, "    Set machine &home here…", self.set_home)
+        act(m, "    &Camera calibration…", lambda: self.show_view("camera"))
+        act(m, "    &Tool library…", self._open_tools)
 
-        m = self.menuBar().addMenu("&Help")
-        a = QAction("&Keyboard shortcuts", self)
-        a.triggered.connect(lambda: QMessageBox.information(self, "Keyboard", (
-            "Esc  —  E-STOP (always)\n\n"
-            "Hold to jog (when 'Keyboard jog' is ticked):\n"
-            "  ← / →     X− / X+\n  ↓ / ↑     Y− / Y+\n  PgDn / PgUp   Z− / Z+\n\n"
-            "Releasing the key stops the motion.")))
-        m.addAction(a)
-        a = QAction("&About", self)
-        a.triggered.connect(lambda: QMessageBox.about(
-            self, "About MicroPCB",
-            f"MicroPCB {__version__}\nControl software for Wegstr CNC machines."))
-        m.addAction(a)
+        m = mb.addMenu("&Help")
+        act(m, "&User guide", lambda: DocViewer("User guide", "user-guide.md", self).exec(),
+            "F1")
+        act(m, "&Safety features", lambda: DocViewer("Safety features", "safety.md", self).exec())
+        act(m, "&Keyboard shortcuts",
+            lambda: QMessageBox.information(self, "Keyboard shortcuts", SHORTCUTS))
+        m.addSeparator()
+        act(m, "&Copy system info", lambda: (QApplication.clipboard().setText(system_info()),
+                                             self.log("System info copied to the clipboard")))
+        act(m, "Open &log / captures folder", self.open_capture_folder)
+        m.addSeparator()
+        act(m, "Check for &updates…", lambda: self.updates.check(manual=True))
+        act(m, f"&About {APP_NAME}", lambda: AboutDialog(self).exec())
+
+    def _show_al_tab(self) -> None:
+        self.set_bottom_visible(True)
+        self.bottom_tabs.setCurrentWidget(self.al_scroll)
+
+    def _open_tools(self) -> None:
+        self.set_bottom_visible(True)
+        self.bottom_tabs.setCurrentIndex(self.bottom_tabs.count() - 1)   # CAM: tool library
 
     # ================================================================ actions
     def log(self, text: str, record: bool = True) -> None:
         self.console.appendPlainText(time.strftime("%H:%M:%S ") + text)
         rec = getattr(self, "recorder", None)
-        if rec is not None and record:   # MicroPCB's actions go into the capture as notes
+        if rec is not None and record:   # the program's actions go into the capture as notes
             rec.record("EV", b"", text)
 
     # ---------------------------------------------------------------- recording
@@ -585,12 +849,12 @@ class MainWindow(QMainWindow):
         from ..bridge.recorder import Recorder
         if on and getattr(self, "recorder", None) is None:
             c = self.ctl
-            meta = {"app": f"MicroPCB {__version__} (direct)",
+            meta = {"app": f"{APP_NAME} {__version__} (direct)",
                     "mode": "simulator" if isinstance(c.link._t, SimMachine) else "real machine",
                     "machine port": self.port_box.currentData() or "-",
                     "mm per step": self.settings.mm_per_step[0],
-                    "dir": "TX = MicroPCB -> machine, RX = machine -> MicroPCB, "
-                           "EV = MicroPCB console line"}
+                    "dir": "TX = program -> machine, RX = machine -> program, "
+                           "EV = program console line"}
             try:
                 self.recorder = Recorder(None, "micropcb", meta)
             except OSError as e:
@@ -718,16 +982,19 @@ class MainWindow(QMainWindow):
         if not self._xy_jog_allowed(axis):
             return
         step = STEP_SIZES[self.step_group.checkedId()]
-        self._do(lambda: self._report_clamp(axis, d * step, self.ctl.jog(axis, d * step, self.speed.value())))
+        spt = self._jog_spt()
+        self._do(lambda: self._report_clamp(axis, d * step, self.ctl.jog(axis, d * step, spt)))
 
     def _report_clamp(self, axis: str, want: float, got: float) -> None:
         if abs(want - got) > 1e-9:
             self.log(f"Soft limit: {axis.upper()} move reduced to {got:.3f} mm")
 
     def _speed_changed(self, v: int) -> None:
-        self.settings.jog_steps_per_tick = v
-        mmpm = v * self.settings.mm_per_step[0] / TICK_SECONDS * 60
-        self.speed_lbl.setText(f"{mmpm:.0f} mm/min")
+        self.settings.jog_speed_pct = int(v)
+        spt = self._jog_spt()
+        self.settings.jog_steps_per_tick = spt
+        mmpm = spt * self.settings.mm_per_step[0] / TICK_SECONDS * 60
+        self.speed_lbl.setText(f"{v}% · {mmpm:.0f} mm/min")
 
     def _spindle_clicked(self, on: bool) -> None:
         self._do(lambda: self.ctl.set_spindle(on))
@@ -747,37 +1014,304 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self.settings.save()
             self.ctl.link.performance = self.settings.performance
-            self.speed.setMaximum(self.settings.max_steps_per_tick)
             self._speed_changed(self.speed.value())
             self.log("Settings saved")
 
-    # ================================================================ job
-    def open_job(self) -> None:
+    # ================================================================ layers / project
+    _active_layer: Layer | None = None
+    _selecting = False
+
+    def current_side(self) -> str:
+        ly = self._active_layer
+        return ly.side if ly is not None else self.al.side
+
+    def _map_state(self, side: str):
+        """Layer list: True = map applied, None = map measured but Apply off, False = none."""
+        if not hasattr(self, "al") or self.al.map_for(side) is None:
+            return False
+        return True if self.al.apply_chk.isChecked() else None
+
+    def add_layers(self) -> None:
         if self.ctl.job_active:
             return
         start = os.path.dirname(self.job_path) if self.job_path else self.settings.last_dir
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Open G-code", start or "",
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Add G-code layer(s)", start or "",
             "G-code (*.nc *.gcode *.ngc *.tap *.cnc *.gc *.txt);;All files (*)")
-        if path:
-            self.load_job(path)
+        last = -1
+        for p in paths:
+            last = self.add_layer_file(p, select=False)
+        if last >= 0:
+            self.layers_box.set_layers(self.layers, last)
 
-    def load_job(self, path: str) -> None:
+    open_job = add_layers   # old name (File > Open G-code)
+
+    def add_layer_file(self, path: str, select: bool = True) -> int:
+        """Read a G-code file into a layer (an already listed file is re-read)."""
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
         except OSError as e:
-            QMessageBox.warning(self, "Open G-code", f"Cannot load the file:\n{e}")
-            return
-        self.load_job_text(text, path)
+            QMessageBox.warning(self, "Add layer", f"Cannot load the file:\n{e}")
+            return -1
         self.settings.last_dir = os.path.dirname(path)
         info, msg = jobfile.read(path, text)
-        self.set_job_info(info, path if info else None)
         if msg:
-            self.log(f"  {os.path.basename(path)}: {msg}" + (
-                f" ({info.operation}, {info.side} side, {len(info.holes)} holes, "
-                f"{len(info.features) - len(info.holes)} pads)" if info else ""))
+            self.log(f"  {os.path.basename(path)}: {msg}")
+        norm = os.path.normcase(os.path.abspath(path))
+        for k, ly in enumerate(self.layers):
+            if os.path.normcase(os.path.abspath(ly.path)) == norm:
+                ly.text, ly.meta, ly.missing = text, info, False
+                if select:
+                    self.layers_box.set_layers(self.layers, k)
+                return k
+        md = float(getattr(self.settings, "job_max_depth", 0.0) or 0.0)
+        ly = Layer.new(path, text, info, md, getattr(self.settings, "job_origin", "file"))
+        self.layers.append(ly)
+        self.log(f"Layer added: {ly.label} ({os.path.basename(path)}, {ly.side} side)")
+        if select:
+            self.layers_box.set_layers(self.layers, len(self.layers) - 1)
+        return len(self.layers) - 1
 
+    def load_job(self, path: str) -> None:
+        """Open a G-code file: added as a layer and selected."""
+        self.add_layer_file(path)
+
+    def remove_layer(self, i: int) -> None:
+        if self.ctl.job_active or not 0 <= i < len(self.layers):
+            return
+        ly = self.layers.pop(i)
+        self.log(f"Layer removed: {ly.label}")
+        if ly is self._active_layer:
+            self._active_layer = None
+        self.layers_box.set_layers(self.layers, min(i, len(self.layers) - 1))
+        if not self.layers:
+            self._clear_job()
+        self._update_layer_overlays()
+
+    def _clear_job(self) -> None:
+        self.job_text = self.job_path = self.job_prog = self.job_prog_raw = None
+        self.tp = self.timeline = None
+        self.issues = []
+        self.gcode_view.set_text("")
+        for v in self._views():
+            v.set_toolpath(None)
+        self._fill_checks()
+        self._show_job_info()
+
+    def select_layer(self, i: int) -> None:
+        if not 0 <= i < len(self.layers) or self.ctl.job_active:
+            return
+        ly = self.layers[i]
+        if ly.missing or not ly.text:
+            self.log(f"⚠ layer {ly.label}: file not found ({ly.path})")
+            return
+        self._selecting = True
+        try:
+            self._active_layer = ly
+            self.al.set_side(ly.side)
+            self.load_job_text(ly.text, ly.path)
+            self.job_meta = ly.meta
+        finally:
+            self._selecting = False
+        self._update_layer_overlays()
+        if self.bottom_tabs.currentWidget() is self.al_scroll:
+            self.al.preview_plan()
+
+    def _layer_options_changed(self) -> None:
+        """Origin / max depth / side / type of the selected layer changed."""
+        self.settings.job_origin = self.origin_combo.currentData()
+        self.settings.job_max_depth = (self.depth_spin.value() if self.depth_chk.isChecked()
+                                       else 0.0)
+        ly = self._active_layer
+        if ly is not None and ly.side != self.al.side:
+            self.al.set_side(ly.side)           # also re-applies the job
+            return
+        self._origin_reload()
+        self._update_layer_overlays()
+
+    def reload_layers(self) -> None:
+        if self.ctl.job_active:
+            return
+        for ly in self.layers:
+            try:
+                with open(ly.path, encoding="utf-8", errors="replace") as f:
+                    ly.text, ly.missing = f.read(), False
+            except OSError:
+                ly.missing = True
+        self.log(f"Reloaded {len(self.layers)} layer(s) from their files")
+        self.layers_box.set_layers(self.layers, self.layers_box.current())
+
+    _overlay_cache: dict = {}
+
+    def _layer_segments(self, ly: Layer):
+        """Cutting moves of a layer as (n, 2, 2) X/Y segments (cached)."""
+        import numpy as np
+        key = (id(ly), len(ly.text), hash(ly.text[:2000]), ly.origin)
+        hit = self._overlay_cache.get(id(ly))
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        try:
+            prog = parse(ly.text, (0.0, 0.0, 0.0))
+            lo = job_min_xy(prog)
+            if ly.origin == "corner" and lo is not None:
+                prog = shift_program(prog, -lo[0], -lo[1])
+            tp = Toolpath(prog)
+            s, e = tp.start, tp.end
+            deep = ~tp.rapid & (np.minimum(s[:, 2], e[:, 2]) < -1e-6)
+            seg = np.stack([s[deep, :2], e[deep, :2]], axis=1)
+        except Exception:   # noqa: BLE001 - overlay only
+            seg = np.zeros((0, 2, 2))
+        self._overlay_cache[id(ly)] = (key, seg)
+        return seg
+
+    def _update_layer_overlays(self) -> None:
+        """Other ticked layers are drawn faint in the 2D view under the selected one."""
+        if not hasattr(self, "preview"):
+            return
+        out = [(self._layer_segments(ly), ly.color) for ly in self.layers
+               if ly.visible and ly is not self._active_layer and ly.text]
+        self.preview.set_layers([o for o in out if len(o[0])])
+        self.layers_box.refresh()
+
+    # ---------------------------------------------------------------- project file
+    def new_project(self) -> None:
+        if self.ctl.job_active:
+            return
+        if self.layers and QMessageBox.question(
+                self, "New project", "Close the layers of this project?\n"
+                "(Files and height maps on disk are not changed.)") != QMessageBox.Yes:
+            return
+        self.layers = []
+        self._active_layer = None
+        self.project_path = ""
+        self.layers_box.set_layers(self.layers, -1)
+        self._clear_job()
+        self._update_layer_overlays()
+        self._refresh()
+
+    def open_project(self, path: str | None = None) -> None:
+        if self.ctl.job_active:
+            return
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open project", self.settings.last_dir or "",
+                "MicroCNC project (*.mcnc.json *.json);;All files (*)")
+            if not path:
+                return
+        try:
+            pr = Project.load(path)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            QMessageBox.warning(self, "Open project", f"Cannot open the project:\n{e}")
+            return
+        for ly in pr.layers:
+            if not ly.missing:
+                ly.meta, _ = jobfile.read(ly.path, ly.text)
+        for side, txt in pr.maps.items():
+            try:
+                self.al.maps[side] = HeightMap.from_json(txt) if txt else None
+            except (ValueError, KeyError, TypeError) as e:
+                self.log(f"⚠ {side} height map in the project not read: {e}")
+        self.layers = pr.layers
+        self._active_layer = None
+        self.project_path = path
+        self.settings.last_dir = os.path.dirname(path)
+        self.settings.last_project = path
+        miss = [ly.path for ly in pr.layers if ly.missing]
+        self.log(f"Project opened: {path} ({len(pr.layers)} layer(s))")
+        if miss:
+            self.log("⚠ files not found: " + ", ".join(miss))
+        self.layers_box.set_layers(self.layers, pr.selected)
+        self.al._show_result()
+        self.al.refresh()
+        self.show_heightmap(self.al.hm)
+        if any(self.al.maps.values()):
+            self.log("Height maps restored from the project - re-zero Z (Probe + set Z 0) "
+                     "on the first map point before applying them")
+        self._refresh()
+
+    project_path = ""
+
+    def save_project(self, ask: bool = False) -> None:
+        path = self.project_path
+        if ask or not path:
+            start = path or os.path.join(self.settings.last_dir or "", "project.mcnc.json")
+            path, _ = QFileDialog.getSaveFileName(self, "Save project", start,
+                                                  "MicroCNC project (*.mcnc.json)")
+            if not path:
+                return
+            if not path.endswith(".json"):
+                path += ".mcnc.json"
+        pr = Project(self.layers, self.layers_box.current(),
+                     {s: (m.to_json() if m is not None else None)
+                      for s, m in self.al.maps.items()}, path)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(pr.to_json(path))
+        except OSError as e:
+            QMessageBox.warning(self, "Save project", f"Cannot save:\n{e}")
+            return
+        self.project_path = path
+        self.settings.last_project = path
+        self.log(f"Project saved: {path}")
+        self._refresh()
+
+    # ---------------------------------------------------------------- jog extras
+    def _jog_spt(self) -> int:
+        """Jog speed slider (%) -> steps per tick (1 … max)."""
+        mx = max(1, int(self.settings.max_steps_per_tick))
+        return max(1, min(mx, round(self.speed.value() / 100 * mx)))
+
+    def z_to_safe(self) -> None:
+        z = self.ctl.work_mm()[2]
+        safe = self.settings.safe_height_mm
+        if z < safe:
+            self._do(lambda: self.ctl.jog("z", safe - z, self._jog_spt()))
+
+    def go_to_position(self) -> None:
+        vals = []
+        for e in self.goto_edits:
+            t = e.text().strip().replace(",", ".")
+            try:
+                vals.append(float(t) if t else None)
+            except ValueError:
+                QMessageBox.warning(self, "Go to", f"Not a number: {t}")
+                return
+        if all(v is None for v in vals):
+            self.statusBar().showMessage("Enter X, Y and / or Z first", 4000)
+            self.log("Go to: enter X, Y and / or Z first")
+            return
+        x, y, z = vals
+        if z is not None and z < 0:
+            if QMessageBox.question(
+                    self, "Go to", f"Z {z:+.3f} is BELOW work zero (into the board).\n\n"
+                    "Go there anyway?") != QMessageBox.Yes:
+                return
+        self.log("Go to work " + "  ".join(f"{a.upper()} {v:.3f}" for a, v in
+                                           zip(AXES, vals) if v is not None))
+        self._do(lambda: self.ctl.go_to(x, y, z))
+
+    # ---------------------------------------------------------------- auto-level preview
+    _probe_plan = None
+
+    def show_probe_plan(self, plan) -> None:
+        """Auto-level panel: points the next run will probe (updates while typing)."""
+        self._probe_plan = plan
+        self._refresh_map_overlay()
+
+    def _refresh_map_overlay(self) -> None:
+        if not hasattr(self, "tool_btns") or not hasattr(self, "al_scroll"):
+            return
+        on = self.tool_btns["map"].isChecked()
+        al_tab = self.bottom_tabs.currentWidget() is self.al_scroll and \
+            (not self.bottom_tabs.isHidden())
+        hm = self.al.hm
+        self.preview.set_probe_plan(self._probe_plan if on and al_tab and not self.al.running
+                                    else None)
+        for v in self._views():
+            v.set_heightmap(hm if on else None)
+
+    # ================================================================ job
     job_meta = None   # jobfile.JobInfo of the loaded G-code (side file), or None
 
     def set_job_info(self, info, path) -> None:
@@ -788,6 +1322,10 @@ class MainWindow(QMainWindow):
 
     def load_job_text(self, text: str, path: str, keep_range: bool = False) -> None:
         """Load G-code from a file or generated by the CAM panel."""
+        if not self._selecting and self._active_layer is not None:
+            self._active_layer = None          # not one of the layers
+            self.layers_box.clear_selection()
+            self._update_layer_overlays()
         if not keep_range and self.ctl.job_range is not None:
             self.ctl.job_range = None          # another file: whole job
             if hasattr(self, "range_lbl"):
@@ -851,8 +1389,7 @@ class MainWindow(QMainWindow):
         return raw
 
     def _origin_changed(self) -> None:
-        self.settings.job_origin = self.origin_combo.currentData()
-        self._origin_reload()
+        self._layer_options_changed()
 
     def _origin_reload(self) -> None:
         self.settings.job_max_depth = (self.depth_spin.value() if self.depth_chk.isChecked()
@@ -898,6 +1435,8 @@ class MainWindow(QMainWindow):
             v.set_marker(None)
         self._show_job_info()
         self._sync_views()
+        if hasattr(self, "al_scroll") and self.bottom_tabs.currentWidget() is self.al_scroll:
+            self.al.preview_plan()
 
     def _check_surface(self):
         """Copper height for the checks when the height map is applied to the job."""
@@ -938,27 +1477,46 @@ class MainWindow(QMainWindow):
         return np.array(lo), np.array(hi)
 
     def _show_job_info(self) -> None:
+        """Job section summary: what Start will run."""
         prog = self.job_prog
         if prog is None:
-            self.job_info.setText("No file loaded")
+            self.job_info.setText("<span style='color:#8b97a5'>No layer loaded - "
+                                  "File ▸ Add G-code layer (Ctrl+L)</span>")
             return
-        parts = [f"<b>{os.path.basename(self.job_path or '')}</b> — "
-                 f"{prog.line_count} lines, est. time {_hms(self._job_secs)}"]
-        b = prog.bounds()
-        if b:
-            parts.append(f"X {b[0][0]:.2f}…{b[1][0]:.2f}  Y {b[0][1]:.2f}…{b[1][1]:.2f}  "
-                         f"Z {b[0][2]:.2f}…{b[1][2]:.2f} mm")
+        ly = self._active_layer
+        mute = "#8b97a5"
+
+        def row(k, v):
+            return (f"<tr><td style='color:{mute}; padding-right:8px'>{k}</td>"
+                    f"<td align='right'>{v}</td></tr>")
+
+        name = ly.label if ly is not None else os.path.basename(self.job_path or "job")
+        rows = [row("Layer", f"<b>{name}</b>")]
+        if ly is not None:
+            rows.append(row("File", os.path.basename(ly.path)))
+        md = self.ctl.job_max_depth
+        rows.append(row("Max cut depth", f"{md:.3f} mm" if md else "off"))
+        side = self.current_side()
+        hm = self.al.active_map()
+        if hm is not None:
+            st = f"<span style='color:#7ee2a8'>{side.title()} map ✓</span>"
+        elif self.al.map_for(side) is not None:
+            st = f"<span style='color:{mute}'>{side.title()} map not applied</span>"
+        else:
+            st = f"<span style='color:{mute}'>none ({side})</span>"
+        rows.append(row("Height map", st))
+        r = self.ctl.job_range
+        part = "whole job" if r is None else f"<b>lines {r[0]} … {r[1]}</b>"
+        rows.append(row("Run", f"{part} · {_hms(self._job_secs)}"))
         n_err = sum(1 for i in self.issues if i.severity == ERROR)
         if n_err:
-            parts.append(f"<span style='color:#c62828'><b>{n_err} problem(s)</b> - "
-                         "see the Checks tab</span>")
+            rows.append(row("Checks", f"<span style='color:#ff7b72'><b>{n_err} problem(s)"
+                                      "</b></span>"))
         elif self.issues:
-            parts.append(f"<span style='color:#e65100'>{len(self.issues)} warning(s) - "
-                         "see the Checks tab</span>")
-        if prog.warnings:
-            parts.append(f"<span style='color:#757575'>{len(prog.warnings)} G-code note(s) "
-                         "in the console</span>")
-        self.job_info.setText("<br>".join(parts))
+            rows.append(row("Checks", f"<span style='color:#d29922'>{len(self.issues)} "
+                                      "warning(s)</span>"))
+        self.job_info.setText("<table width='100%' cellspacing='0' cellpadding='1'>"
+                              + "".join(rows) + "</table>")
 
     def run_job(self) -> None:
         if self.job_text is None or self.ctl.job_active:
@@ -1063,7 +1621,7 @@ class MainWindow(QMainWindow):
         active = self.ctl.job_active
         con = self.ctl.connected
         rel = con and self.ctl.link.released
-        self.open_btn.setEnabled(not active)
+        self.layers_box.setEnabled(not active)
         self.run_btn.setEnabled(bool(self.job_text) and con and not rel and not active
                                 and self.ctl.position_valid and not self.al.running)
         self.pause_btn.setEnabled(active and job.state in (RUNNING, PAUSED_STATE))
@@ -1080,12 +1638,16 @@ class MainWindow(QMainWindow):
                      STOPPING: "Stopping…", DONE: "Done", STOPPED: "Stopped",
                      FAILED: "Failed"}
             self.job_status.setText(
-                f"{names.get(job.state, job.state)} · line {job.line}/"
-                f"{job.program.line_count} · {frac * 100:.0f}% · "
+                f"{names.get(job.state, job.state)} · {frac * 100:.0f}% · "
                 f"{_hms(job.elapsed())} / left {_hms(left)}")
+            self.job_status.show()
+            self.job_head.setText(f"line {job.line} / {job.program.line_count}")
         else:
             self.job_bar.setValue(0)
             self.job_status.setText("")
+            self.job_status.hide()
+            n = self.job_prog.line_count if self.job_prog is not None else 0
+            self.job_head.setText(f"{n} lines" if n else "")
         self._sync_views()
 
     # ---------------------------------------------------------------- auto-level
@@ -1102,8 +1664,10 @@ class MainWindow(QMainWindow):
         hm = self.al.active_map()
         al = self.camera.active_alignment() if hasattr(self, "camera") else None
         self.ctl.program_transform = self._transformed if (hm or al) else None
+        if hasattr(self, "layers_box"):
+            self.layers_box.refresh()
         if hm is not None:
-            self.log("Height map applied to the job")
+            self.log(f"{self.current_side().title()} height map applied to the job")
             if self.job_prog_raw is not None:
                 out = outside_map(self.job_prog_raw, hm)
                 if out:
@@ -1113,6 +1677,8 @@ class MainWindow(QMainWindow):
                      f"X {al.tx:+.3f} Y {al.ty:+.3f} mm")
         if self.job_prog_raw is not None and not self.ctl.job_active:
             self._set_program(self._transformed(self.job_prog_raw))
+        elif hasattr(self, "job_info"):
+            self._show_job_info()
 
     def recheck_job(self) -> None:
         """Obstacles changed: run the checks again."""
@@ -1120,8 +1686,12 @@ class MainWindow(QMainWindow):
             self._set_program(self.job_prog)
 
     def show_heightmap(self, hm) -> None:
+        on = not hasattr(self, "tool_btns") or self.tool_btns["map"].isChecked()
         for v in self._views():
-            v.set_heightmap(hm)
+            v.set_heightmap(hm if on else None)
+        if hasattr(self, "layers_box"):
+            self.layers_box.refresh()
+        self._refresh_map_overlay()
 
     # ---------------------------------------------------------------- views
     def _views(self) -> list:
@@ -1173,17 +1743,19 @@ class MainWindow(QMainWindow):
             if self.view3d is not None:
                 self.view_tabs.setTabVisible(self.view_tabs.indexOf(self.view3d), False)
                 self.view_tabs.setCurrentWidget(self.preview)
+            self._sync_view_buttons()
             return
         if self.view3d is None:
             from .view3d import View3D  # OpenGL only loaded when wanted
             self.view3d = View3D(q)
-            self.view_tabs.addTab(self.view3d, "3D")
+            self.view_tabs.insertTab(1, self.view3d, "3D")
         else:
             self.view_tabs.setTabVisible(self.view_tabs.indexOf(self.view3d), True)
             self.view3d.set_quality(q)
         if self.tp is not None and self.view3d.tp is not self.tp:
             self.view3d.set_toolpath(self.tp)
         self._sync_views()
+        self._sync_view_buttons()
 
     def select_line(self, line: int, from_text: bool = False) -> None:
         if not line:
@@ -1275,8 +1847,9 @@ class MainWindow(QMainWindow):
     def _show_range(self) -> None:
         r = self.ctl.job_range
         self.range_lbl.setText("Run: whole job" if r is None else
-                               f"<b>Run: only lines {r[0]} … {r[1]}</b> (safe start and end)")
+                               f"<b>Run: lines {r[0]} … {r[1]}</b>")
         self.range_clear_btn.setEnabled(r is not None)
+        self._show_job_info()
 
     def _play_to_selected(self) -> None:
         if self.timeline is not None and self._sel_line:
@@ -1322,7 +1895,7 @@ class MainWindow(QMainWindow):
             self._on_job_event(payload)
         elif ev == "ui_error":
             self.log(f"⚠ {payload}")
-            QMessageBox.warning(self, "MicroPCB", str(payload))
+            QMessageBox.warning(self, APP_NAME, str(payload))
         self._refresh()
 
     def _try_reconnect(self) -> None:
@@ -1347,18 +1920,20 @@ class MainWindow(QMainWindow):
         self.port_box.setEnabled(not con)
 
         if not con:
-            st, col = ("Reconnecting…", "#e65100") if self._lost_port else ("Disconnected", "#757575")
+            st, col = ("Reconnecting…", "#d29922") if self._lost_port else ("Disconnected", "#8b97a5")
         elif rel:
-            st, col = "Motors released", "#e65100"
+            st, col = "Motors released", "#d29922"
         elif c.job_active:
-            st, col = (("Job paused", "#e65100") if c.job.state == PAUSED_STATE
-                       else ("Running job", "#1565c0"))
+            st, col = (("Job paused", "#d29922") if c.job.state == PAUSED_STATE
+                       else ("Running job", "#58a6ff"))
         elif c.busy():
-            st, col = "Moving", "#1565c0"
+            st, col = "Moving", "#58a6ff"
         else:
-            st, col = "Idle", "#2e7d32"
-        self.status_lbl.setText(f"● {st}")
-        self.status_lbl.setStyleSheet(f"font-weight:bold; padding:0 10px; color:{col};")
+            st, col = "Idle", "#3fb950"
+        self.status_lbl.setText(f"● {'Connected · ' if con and st != 'Reconnecting…' else ''}{st}")
+        self.status_lbl.setStyleSheet(
+            f"font-weight:600; padding:1px 9px; border-radius:9px; color:{col};"
+            f" border:1px solid {col}; background:#11161b;")
 
         msgs = []
         if self._lost_port:
@@ -1369,7 +1944,7 @@ class MainWindow(QMainWindow):
                         "Press it again to engage the motors.")
         if not valid:
             msgs.append("Position is NOT reliable. Jog to your work origin and press "
-                        "'Zero all' (or Machine → Set machine home).")
+                        "'Zero all' (or Settings ▸ Set machine home).")
         self.banner.setText("\n".join(msgs))
         self.banner.setVisible(bool(msgs))
 
@@ -1377,6 +1952,7 @@ class MainWindow(QMainWindow):
         for w in self.jog_widgets:
             w.setEnabled(con and not rel and (not c.job_active or c.job_paused)
                          and not al_busy)
+        self.port_box.setEnabled(not con)
         self.al.refresh()
 
         wp, mp = c.work_mm(), c.machine_mm()
@@ -1386,13 +1962,31 @@ class MainWindow(QMainWindow):
             self.work_lbl[i].setStyleSheet(color)
             self.mach_lbl[i].setText(f"{mp[i]:9.3f}")
 
-        sp = con and c.link.spindle
-        self.spindle_btn.setChecked(sp)
-        self.spindle_btn.setText("Spindle ON" if sp else "Spindle OFF")
-        self.spindle_btn.setStyleSheet("background:#fdd835; font-weight:bold;" if sp else "")
+        sp = bool(con and c.link.spindle)
+        if self.spindle_btn.isChecked() != sp:
+            self.spindle_btn.setChecked(sp)
+        self.spindle_lamp.set_on(sp)
+        self.spindle_state.setText("Running" if sp else "Stopped")
+        self.spindle_state.setStyleSheet("font-weight:600; color:%s;" % ("#3fb950" if sp else "#dfe5ec"))
         self._refresh_job()
-        self.home_lbl.setText("Soft limits: ON" if c.limits_active()
-                              else "Soft limits: off (home not set)")
+        self._refresh_info()
+
+    def _refresh_info(self) -> None:
+        c = self.ctl
+        parts = [f"Jog {self.speed_lbl.text().split('· ')[-1]}"]
+        if self.project_path or self.layers:
+            name = os.path.splitext(os.path.splitext(os.path.basename(
+                self.project_path))[0])[0] if self.project_path else "unsaved project"
+            parts.append(f"Project: {name} · {len(self.layers)} layer(s)")
+        elif self.job_path:
+            parts.append(f"File: {os.path.basename(self.job_path)}")
+        parts.append("Soft limits ON" if c.limits_active() else "Soft limits off (home not set)")
+        if getattr(self, "recorder", None) is not None:
+            parts.append("<span style='color:#ff7b72'>● Recording</span>")
+        txt = " &nbsp;·&nbsp; ".join(parts)
+        if txt != getattr(self, "_info_txt", None):
+            self._info_txt = txt
+            self.info_lbl.setText(txt)
 
     # ================================================================ keyboard
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
@@ -1417,7 +2011,7 @@ class MainWindow(QMainWindow):
             if not self._xy_jog_allowed(axis):
                 return True
             self._held_key = key
-            self._do(lambda: self.ctl.jog_continuous(axis, d, self.speed.value()))
+            self._do(lambda: self.ctl.jog_continuous(axis, d, self._jog_spt()))
         elif t == QEvent.KeyRelease and key == self._held_key:
             self._held_key = None
             self.ctl.stop()

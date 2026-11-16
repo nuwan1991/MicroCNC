@@ -69,6 +69,9 @@ class SettingsDialog(QDialog):
                                   "(Documents\\MicroPCB height maps)")
         self.autosave.setChecked(settings.autosave_heightmaps)
         form.addRow("Height maps", self.autosave)
+        self.updates = QCheckBox("Check for a new version at startup (www.microchip.lk)")
+        self.updates.setChecked(getattr(settings, "check_updates", True))
+        form.addRow("Updates", self.updates)
 
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._accept)
@@ -99,4 +102,5 @@ class SettingsDialog(QDialog):
         s.jog_low_z_warning = self.low_warn.isChecked()
         s.jog_low_z_mm = self.low_mm.value()
         s.autosave_heightmaps = self.autosave.isChecked()
+        s.check_updates = self.updates.isChecked()
         self.accept()

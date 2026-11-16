@@ -1,7 +1,11 @@
-# MicroPCB
+# MicroCNC
 
-Control software for Wegstr CNC machines, focused on PCB milling.
-Status: **0.2.0** — bridge records timed serial captures + report (docs/bridge-guide.md §7); **Stage 4** — fixed bed camera: calibration, board alignment from holes / pads,
+Control software for PCB milling & CNC (Wegstr machines) — © Microchip Solutions (Pvt) Ltd,
+www.microchip.lk/microcnc. (Python package: `micropcb`.)
+**0.3.0**: new window layout, job layers + project files, Top / Bottom height maps, auto-level
+point preview, Go to X/Y/Z, Help menu (user guide, safety, update check) — see
+[user guide](docs/user-guide.md).
+Earlier: **0.2.0** — bridge records timed serial captures + report (docs/bridge-guide.md §7); **Stage 4** — fixed bed camera: calibration, board alignment from holes / pads,
 obstacle warnings, PCB / toolpath overlay on the live picture; Stage 3: PCB import (Gerber / Excellon from KiCad, EasyEDA), isolation
 routing, copper clearing, drilling, cutout with tabs, tool changes, double-sided
 boards with alignment pins; on top of Stage 2 (3D view, G-code viewer, checks, playback, auto-level) and
@@ -22,18 +26,20 @@ GUI:
 ```
 .venv\Scripts\python -m micropcb
 ```
-MicroPCB CAM - Gerber / drill to G-code, no machine needed
+MicroCNC CAM - Gerber / drill to G-code, no machine needed
 (see [split design](docs/split-design.md)):
 ```
 .venv\Scripts\python -m micropcb.apps.cam
 ```
-Windows installer (MicroPCB + MicroPCB CAM, Start menu shortcuts, uninstaller) -
+Windows installer (MicroCNC + MicroCNC CAM, Start menu shortcuts, uninstaller) -
 needs PyInstaller in the .venv and Inno Setup 6:
 ```
 powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
 ```
-Output: `dist\installer\MicroPCB-Setup-<version>.exe`. Check a build without opening a
-window: `MicroPCB.exe --selftest result.txt` (writes "ok …" or the error).
+Output: `dist\installer\MicroCNC-Setup-<version>.exe`. Check a build without opening a
+window: `MicroCNC.exe --selftest result.txt` (writes "ok …" or the error).
+Update check: upload `packaging/latest.json` (new version number) to
+`https://www.microchip.lk/MicroCNC/latest.json` with each release.
 
 Bridge for the original Wegstr software (auto-level fix / simulated machine),
 see [bridge guide](docs/bridge-guide.md):

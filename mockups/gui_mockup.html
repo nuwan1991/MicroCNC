@@ -1,0 +1,248 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>MicroCNC GUI mockup</title>
+<style>
+:root{--bg:#15191e;--panel:#1d232a;--panel2:#242b33;--line:#323b45;--text:#dfe5ec;--mute:#8b97a5;
+--acc:#2f81f7;--ok:#2ea043;--warn:#d29922;--bad:#da3633;--x:#e5534b;--y:#57ab5a;--z:#539bf5}
+*{box-sizing:border-box}body{margin:0;background:#0d1014;color:var(--text);font:13px "Segoe UI",sans-serif;padding:16px}
+h2{font-size:15px;margin:28px 0 8px;color:#fff}.note{color:var(--mute);max-width:1100px;margin:4px 0 10px}
+.win{width:1360px;max-width:100%;background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.title{background:#0f1317;padding:6px 10px;color:var(--mute);font-size:12px;display:flex;justify-content:space-between}
+.menu{display:flex;gap:2px;background:#1a1f25;border-bottom:1px solid var(--line);padding:2px 6px}
+.menu span{padding:4px 10px;border-radius:3px}.menu span.on{background:var(--panel2)}
+.bar{white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+select,input{background:#11161b;color:var(--text);border:1px solid var(--line);border-radius:4px;padding:4px 6px;font:inherit}
+.btn{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:4px;padding:5px 10px;cursor:default;white-space:nowrap;text-align:center}
+.btn.p{background:var(--acc);border-color:var(--acc);color:#fff}.btn.g{background:var(--ok);border-color:var(--ok);color:#fff}
+.btn.w{background:#9e6a03;border-color:#9e6a03;color:#fff}.btn.r{background:var(--bad);border-color:var(--bad);color:#fff}
+.btn.sm{padding:3px 7px;font-size:12px}.btn.sel{background:#1f3a5f;border-color:var(--acc);color:#fff}
+.pill{padding:3px 9px;border-radius:10px;font-size:12px;background:#12261a;color:#7ee2a8;border:1px solid #1f5130}
+.estop{margin-left:auto;background:var(--bad);color:#fff;font-weight:700;border-radius:5px;padding:7px 18px;border:2px solid #ff7b72;letter-spacing:.5px}
+.main{display:grid;grid-template-columns:300px 1fr;height:884px}
+.side{border-right:1px solid var(--line);background:var(--panel);overflow:hidden;display:flex;flex-direction:column}
+.sec{border-bottom:1px solid var(--line);padding:8px 10px}
+.sec h3{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--mute);display:flex;justify-content:space-between}
+.dro{display:grid;grid-template-columns:22px 1fr 1fr 34px;gap:3px 6px;align-items:center}
+.dro .ax{font-weight:700;font-size:15px}.dro .w{font:600 20px Consolas,monospace;text-align:right;background:#0f1418;border-radius:3px;padding:1px 6px}
+.dro .m{font:12px Consolas,monospace;color:var(--mute);text-align:right}
+.row{display:flex;gap:5px;align-items:center;margin-top:6px}.row .btn{flex:1}
+.run .btn{padding:8px 4px;font-weight:600}
+.pad{display:grid;grid-template-columns:repeat(3,40px) 12px 40px;grid-template-rows:repeat(3,32px);gap:4px;justify-content:center;margin:6px 0}
+.pad .btn{padding:0;display:flex;align-items:center;justify-content:center;font-weight:600}
+.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:3px}
+.slider{display:flex;align-items:center;gap:8px;margin-top:8px}.track{flex:1;height:6px;background:#11161b;border-radius:3px;position:relative}
+.track i{position:absolute;left:0;top:0;bottom:0;width:60%;background:var(--acc);border-radius:3px}
+.track b{position:absolute;left:60%;top:-5px;width:16px;height:16px;margin-left:-8px;background:#fff;border-radius:50%}
+.spin{display:flex;align-items:center;gap:10px}.led{width:12px;height:12px;border-radius:50%;background:#4a535d;box-shadow:inset 0 0 2px #000}
+.led.on{background:#3fb950;box-shadow:0 0 8px #3fb950}
+.sw{width:46px;height:24px;border-radius:12px;background:#3a434d;position:relative;margin-left:auto}.sw::after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#cfd6dd}
+.sw.on{background:var(--ok)}.sw.on::after{left:25px}
+.content{display:grid;grid-template-rows:34px 1fr 190px;min-width:0}
+.vtabs{display:flex;align-items:center;gap:4px;padding:0 8px;background:var(--panel);border-bottom:1px solid var(--line)}
+.vtabs .tools{margin-left:auto;display:flex;gap:4px;color:var(--mute)}
+.canvas{position:relative;background:radial-gradient(#1b2229 1px,transparent 1px) 0 0/20px 20px,#11161b;overflow:hidden}
+.ovl{position:absolute;background:rgba(21,25,30,.85);border:1px solid var(--line);border-radius:4px;padding:4px 8px;font-size:12px;color:var(--mute)}
+.bottom{border-top:1px solid var(--line);display:grid;grid-template-rows:28px 1fr;background:var(--panel)}
+.btabs{display:flex;gap:0;border-bottom:1px solid var(--line)}.btabs span{padding:5px 14px;color:var(--mute);border-right:1px solid var(--line)}
+.btabs span.on{color:#fff;background:var(--panel2);box-shadow:inset 0 2px 0 var(--acc)}
+.mono{font:12px Consolas,monospace;color:#a8b3bf;padding:6px 10px;line-height:1.55}
+.status{display:flex;gap:18px;padding:4px 10px;background:#0f1317;border-top:1px solid var(--line);font-size:12px;color:var(--mute)}
+.grid2{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;padding:8px 10px}
+.box{border:1px solid var(--line);border-radius:5px;padding:8px}.box h4{margin:0 0 6px;font-size:12px;color:#fff}
+.f{display:grid;grid-template-columns:150px 1fr;gap:4px 8px;align-items:center;font-size:12px}
+.new{color:#7ee2a8;font-size:11px}
+.dd{display:flex;gap:14px;flex-wrap:wrap}.ddm{background:var(--panel);border:1px solid var(--line);border-radius:5px;min-width:230px;padding:4px 0;box-shadow:0 6px 16px #0008}
+.ddm div{padding:5px 14px;display:flex;justify-content:space-between}.ddm div small{color:var(--mute)}.ddm hr{border:0;border-top:1px solid var(--line);margin:4px 0}
+.ddm .hd{color:var(--acc);font-weight:600}
+.dlg{background:var(--panel);border:1px solid var(--line);border-radius:6px;width:440px;box-shadow:0 10px 30px #000a}
+.dlg .t{padding:8px 12px;border-bottom:1px solid var(--line);font-weight:600}.dlg .b{padding:14px}
+.logo{width:56px;height:56px;border-radius:10px;background:linear-gradient(135deg,#2f81f7,#1a4f99);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:20px;color:#fff}
+a{color:#58a6ff}
+</style></head><body>
+
+<h1 style="font-size:18px;margin:0">MicroCNC 0.3.0 — GUI proposal (mockup only, no code changed)</h1>
+<p class="note">Dark, low-glare theme (good in a workshop next to a machine). One blue accent for normal actions, green only for "running / on", amber for pause, red only for Stop and E-STOP. Left column is fixed at 300 px; everything else goes to the view.</p>
+
+<!-- ================= MAIN WINDOW ================= -->
+<h2>1. Main window</h2>
+<div class="win">
+ <div class="title" style="align-items:center;padding:5px 10px;background:#0f1317">
+  <b style="color:#fff;font-size:13px;min-width:150px">MicroCNC 0.3.0</b>
+  <span style="display:flex;gap:14px;align-items:center;color:var(--mute);white-space:nowrap">
+   <span class="pill">● Connected · Idle</span><span>Feed 300 mm/min</span><span>Project: Board_A · 5 layers · est. 41 min</span><span>Firmware 1.4</span><span>Recording: off</span></span>
+  <span style="min-width:150px;text-align:right">— ▢ ✕</span>
+ </div>
+ <div class="menu" style="align-items:center;padding:3px 6px;white-space:nowrap">
+  <span>File</span><span>View</span><span>Settings</span><span>Help</span>
+  <span class="estop" style="padding:4px 22px">■ E-STOP (Esc)</span>
+ </div>
+ <div class="main">
+  <div class="side">
+   <div style="height:34px;flex:none;display:flex;align-items:center;padding:0 10px;border-bottom:1px solid var(--line);background:var(--panel)">
+  <span style="display:flex;align-items:center;gap:4px;width:100%"><span style="color:var(--mute)">Port</span>
+  <select style="flex:1;min-width:0"><option>COM5 · Wegstr</option></select>
+  <span class="btn sm">⟳</span><span class="btn sm p">Connect</span></span>
+   </div>
+   <div class="sec">
+    <h3><span>Position (mm)</span><span>Work · Machine</span></h3>
+    <div class="dro" style="grid-template-columns:16px 1fr 62px 30px 14px 46px">
+     <span class="ax" style="color:var(--x)">X</span><span class="w">12.450</span><span class="m">62.450</span><span class="btn sm">0</span>
+     <span style="grid-row:1/4;grid-column:5;align-self:stretch;margin:13px 0;border:1.5px solid var(--acc);border-left:none;border-radius:0 4px 4px 0;position:relative"><i style="position:absolute;right:-1.5px;top:50%;width:6px;border-top:1.5px solid var(--acc);transform:translateX(100%)"></i></span>
+     <span class="btn sm" style="grid-row:1/4;grid-column:6;align-self:center;padding:6px 2px;line-height:1.2;border-color:var(--acc)">Zero<br>all</span>
+     <span class="ax" style="color:var(--y)">Y</span><span class="w">8.200</span><span class="m">48.200</span><span class="btn sm">0</span>
+     <span class="ax" style="color:var(--z)">Z</span><span class="w">1.000</span><span class="m">-3.120</span><span class="btn sm">0</span>
+    </div>
+   </div>
+   <div class="sec">
+    <h3><span>Jog</span><span>⌨ keyboard: on</span></h3>
+    <div style="color:var(--mute);font-size:11px;margin-bottom:3px">Step (mm)</div>
+    <div class="steps" style="grid-template-columns:repeat(6,1fr)"><span class="btn sm" style="padding:3px 2px">0.004</span><span class="btn sm">0.01</span><span class="btn sm">0.1</span><span class="btn sm sel">1</span><span class="btn sm">5</span><span class="btn sm">10</span></div>
+    <div class="pad">
+     <span></span><span class="btn">Y+</span><span></span><span></span><span class="btn">Z+</span>
+     <span class="btn">X−</span><span class="btn r" style="font-size:11px">■</span><span class="btn">X+</span><span></span><span class="btn" style="font-size:10px">Z0</span>
+     <span></span><span class="btn">Y−</span><span></span><span></span><span class="btn">Z−</span>
+    </div>
+    <div class="row" style="margin:0 0 6px"><span class="btn sm">⌂ Go to work zero</span><span class="btn sm">⤒ Z safe height</span></div>
+    <div style="display:grid;grid-template-columns:auto 1fr auto 1fr auto 1fr auto;gap:4px;align-items:center;font-size:12px;margin-bottom:4px">
+     <b style="color:var(--x)">X</b><input value="10.000" style="width:100%;padding:3px 4px">
+     <b style="color:var(--y)">Y</b><input value="5.000" style="width:100%;padding:3px 4px">
+     <b style="color:var(--z)">Z</b><input value="1.000" style="width:100%;padding:3px 4px">
+     <span class="btn sm p" title="Work coordinates. Empty box = axis stays. Lifts to safe Z first.">Go to</span>
+    </div>
+    <div class="slider"><span style="color:var(--mute);font-size:11px">Speed</span><div class="track"><i></i><b></b></div><span style="font:600 12px Consolas;width:36px;text-align:right">60%</span></div>
+   </div>
+   <div class="sec">
+    <h3><span>Spindle</span></h3>
+    <div class="spin"><span class="led"></span><b>Stopped</b><span class="sw"></span></div>
+   </div>
+   <div class="sec run" style="background:#1a2129">
+    <h3><span>Job</span><span>line 0 / 2431</span></h3>
+    <div style="font-size:12px;line-height:1.6;background:#11161b;border:1px solid var(--line);border-radius:4px;padding:4px 8px;margin-bottom:6px">
+     <div style="display:flex;justify-content:space-between"><span style="color:var(--mute)">Layer</span><b>Top isolation</b></div>
+     <div style="display:flex;justify-content:space-between"><span style="color:var(--mute)">Max cut depth</span><span>0.08 mm (12 raised)</span></div>
+     <div style="display:flex;justify-content:space-between"><span style="color:var(--mute)">Height map</span><span style="color:#7ee2a8">Top map 9 ✓</span></div>
+     <div style="display:flex;justify-content:space-between"><span style="color:var(--mute)">Run</span><span>whole job · est. 18 min</span></div>
+    </div>
+    <div class="row" style="margin-top:0"><span class="btn g">▶ Start</span><span class="btn w">⏸ Pause</span><span class="btn r">■ Stop</span></div>
+    <div style="height:6px;background:#11161b;border-radius:3px;margin-top:7px"><div style="width:0%;height:6px;background:var(--ok)"></div></div>
+   </div>
+   <div class="sec" style="flex:1">
+    <h3><span>Layers <span class="new">new</span></span><span><span class="btn sm">＋ Add</span></span></h3>
+    <div style="font-size:12px;display:grid;grid-template-columns:16px 10px 1fr auto;gap:3px 6px;align-items:center">
+     <span>👁</span><i style="width:9px;height:9px;background:#d4a64a;border-radius:2px"></i><b>Top isolation</b><span style="color:#7ee2a8">map T ✓</span>
+     <span>👁</span><i style="width:9px;height:9px;background:#e5534b;border-radius:2px"></i><span>Drill</span><span style="color:var(--mute)">—</span>
+     <span>👁</span><i style="width:9px;height:9px;background:#c678dd;border-radius:2px"></i><span>Alignment holes</span><span style="color:var(--mute)">—</span>
+     <span style="opacity:.4">👁</span><i style="width:9px;height:9px;background:#56b6c2;border-radius:2px"></i><span style="color:var(--mute)">Bottom isolation</span><span style="color:var(--warn)">map B ✗</span>
+     <span>👁</span><i style="width:9px;height:9px;background:#8b97a5;border-radius:2px"></i><span>Board cutout</span><span style="color:var(--mute)">—</span>
+    </div>
+    <div class="f" style="grid-template-columns:96px 1fr"><span>Origin</span><select><option>Lower-left of cuts</option></select>
+     <span>Max cut depth</span><span><input type="checkbox" checked> <input style="width:66px" value="0.08 mm"></span>
+     <span>Height map</span><span><input type="checkbox" checked> Top map (9)</span></div>
+   </div>
+  </div>
+
+  <div class="content">
+   <div class="vtabs">
+    <span class="btn sm sel">2D</span><span class="btn sm">3D</span><span class="btn sm">PCB</span><span class="btn sm">Camera</span>
+    <span class="tools"><span class="btn sm">⤢ Fit</span><span class="btn sm">Top</span><span class="btn sm">Iso</span><span class="btn sm">Map overlay</span><span class="btn sm" title="Hide bottom panel">▾ Panel</span><span class="btn sm" title="Full screen view">⛶</span></span>
+   </div>
+   <div class="canvas">
+    <svg width="100%" height="100%" viewBox="0 0 1000 560" preserveAspectRatio="xMidYMid meet">
+     <rect x="120" y="70" width="760" height="420" fill="#1c2620" stroke="#3b4b40"/>
+     <g stroke="#d4a64a" stroke-width="2" fill="none" opacity=".85">
+      <path d="M160 120 h220 v80 h140 M160 180 h160 v120 h260 v80 M600 120 h240 M600 160 v120 h240 M200 420 h300 v-60 h180 M700 420 h140"/>
+      <circle cx="380" cy="200" r="12"/><circle cx="520" cy="200" r="12"/><circle cx="580" cy="380" r="12"/><circle cx="840" cy="120" r="12"/>
+     </g>
+     <path d="M100 500 L400 500" stroke="var(--x)" stroke-width="2"/><path d="M100 500 L100 300" stroke="var(--y)" stroke-width="2"/>
+     <g stroke="#e5534b" stroke-width="2" fill="none"><circle cx="300" cy="260" r="5"/><circle cx="640" cy="330" r="5"/><circle cx="760" cy="200" r="5"/></g>
+     <rect x="125" y="75" width="750" height="410" fill="none" stroke="#8b97a5" stroke-width="2" stroke-dasharray="10 6"/>
+     <!-- auto-level preview -->
+     <rect x="140" y="90" width="720" height="380" fill="none" stroke="#58a6ff" stroke-dasharray="4 4"/>
+     <g fill="none" stroke="#58a6ff" stroke-width="2">
+      <circle cx="140" cy="90" r="6"/><circle cx="320" cy="90" r="6"/><circle cx="500" cy="90" r="6"/><circle cx="680" cy="90" r="6"/><circle cx="860" cy="90" r="6"/>
+      <circle cx="140" cy="280" r="6"/><circle cx="320" cy="280" r="6"/><circle cx="500" cy="280" r="6"/><circle cx="680" cy="280" r="6"/><circle cx="860" cy="280" r="6"/>
+      <circle cx="140" cy="470" r="6"/><circle cx="320" cy="470" r="6"/><circle cx="500" cy="470" r="6"/><circle cx="680" cy="470" r="6"/><circle cx="860" cy="470" r="6"/>
+     </g>
+     <g fill="#58a6ff"><circle cx="400" cy="160" r="3.5"/><circle cx="450" cy="200" r="3.5"/><circle cx="560" cy="200" r="3.5"/><circle cx="600" cy="140" r="3.5"/><circle cx="620" cy="250" r="3.5"/><circle cx="560" cy="360" r="3.5"/><circle cx="240" cy="400" r="3.5"/></g>
+     <g fill="#3fb950"><circle cx="140" cy="90" r="4"/><circle cx="320" cy="90" r="4"/><circle cx="500" cy="90" r="4"/></g>
+    </svg>
+    <div class="ovl" style="left:10px;top:10px">Layers shown: Top isolation · Drill · Alignment · Cutout &nbsp;|&nbsp; X 0 … 76.4 · Y 0 … 42.1 mm</div>
+    <div class="ovl" style="right:10px;top:10px;color:var(--text)"><b style="color:#58a6ff">Auto-level preview</b> (updates while you type)<br>○ coarse 15 · ● fine 7 (small gaps) · <span style="color:#3fb950">●</span> measured 3<br>22 points · ≈ 3 min · side: Top</div>
+    <div class="ovl" style="left:10px;right:10px;bottom:10px;display:flex;gap:8px;align-items:center">
+     <span class="btn sm">▶ Simulate</span><span class="btn sm">⟲</span>
+     <div class="track" style="height:5px"><i style="width:35%"></i><b style="left:35%;width:12px;height:12px;top:-4px;margin-left:-6px"></b></div>
+     <span style="font-family:Consolas">line 851</span><span class="btn sm">⟦ Start here</span><span class="btn sm">End here ⟧</span><span class="btn sm">✕ Whole job</span>
+    </div>
+   </div>
+   <div class="bottom">
+    <div class="btabs"><span class="on">Console</span><span>G-code</span><span>Checks</span><span>Auto-level</span><span>PCB</span><span>CAM</span>
+     <span style="margin-left:auto;border:0;border-left:1px solid var(--line)">Clear · ● Record · ☐ raw traffic</span></div>
+    <div class="mono">10:41:02 Connected COM5 (Wegstr, fw 1.4)<br>10:41:10 Height map 9 loaded: 54 points, range −0.06 … +0.21 mm<br>10:41:15 Job PCB.txt loaded · origin lower-left of cuts · max depth 0.08 mm (12 moves raised)</div>
+   </div>
+  </div>
+ </div>
+</div>
+<p class="note">• The bottom panel can be dragged smaller or hidden with "▾ Panel"; the view then takes the whole right side. "⛶" makes the view full screen.<br>• The simulation bar moves into the view (overlay), so it costs no extra height.<br>• Start / Pause / Stop now sit right under Position, close to the jog keys.</p>
+
+<!-- ================= MENUS ================= -->
+<h2>2. Menus</h2>
+<div class="dd">
+ <div class="ddm"><div class="hd">File</div><hr><div>New project</div><div>Open project… <small>Ctrl+O</small></div><div>Save project <small>Ctrl+S</small></div><div>Recent ▸</div><hr><div>Add G-code layer… <small>Ctrl+L</small></div><div>Reload layers <small>F5</small></div><hr><div>Open height map (Top/Bottom)…</div><div>Save height map…</div><hr><div>Open captures folder</div><hr><div>Exit</div></div>
+ <div class="ddm"><div class="hd">View</div><hr><div>2D <small>F1</small></div><div>3D <small>F2</small></div><div>PCB <small>F3</small></div><div>Camera <small>F4</small></div><hr><div>Show bottom panel <small>F6</small></div><div>Full-screen view <small>F11</small></div><div>Fit to job</div><hr><div>Theme ▸ Dark / Light</div></div>
+ <div class="ddm"><div class="hd">Settings</div><hr><div>Preferences… <small>Ctrl+,</small></div><div>Safety switches…</div><hr><div style="color:var(--mute)">Machine</div><div>&nbsp; Set machine home here…</div><div>&nbsp; Soft limits…</div><div>&nbsp; Camera calibration…</div><div>&nbsp; Tool library…</div></div>
+ <div class="ddm"><div class="hd">Help</div><hr><div>User guide <small>F1·Shift</small></div><div>Safety features</div><div>Keyboard shortcuts</div><hr><div>Copy system info</div><div>Open log folder</div><hr><div>Check for updates…</div><div>About MicroCNC</div></div>
+</div>
+<p class="note">Everything from the old "Machine" menu moves under Settings ▸ Machine.</p>
+
+<!-- ================= AUTO-LEVEL ================= -->
+<h2>3. Auto-level tab (bottom panel) — wide 3-column layout</h2>
+<div class="win" style="width:1060px">
+ <div class="grid2">
+  <div class="box"><h4>1. Probe test</h4><div style="color:var(--mute);font-size:12px;margin-bottom:6px">Clip on the copper, tool in the spindle (spindle OFF).</div>
+   <div class="row"><span class="btn sm">Test touch…</span><span class="btn sm">Probe here</span></div>
+   <div class="row"><span class="btn sm">Probe + set Z 0</span><span class="btn sm">Check Z drift</span></div>
+   <div style="font-size:12px;margin-top:6px">Last: Z +0.203 mm ✓</div></div>
+  <div class="box"><h4>2. Grid (work coordinates)</h4>
+   <div class="f"><span>X from / to</span><span><input style="width:60px" value="0"> <input style="width:60px" value="76.4"></span>
+    <span>Y from / to</span><span><input style="width:60px" value="0"> <input style="width:60px" value="42.1"></span>
+    <span><b>Map for side</b> <span class="new">new</span></span><select><option>Top</option><option>Bottom</option></select>
+    <span>Point spacing</span><input value="10 mm">
+    <span>Edge margin</span><input value="1 mm">
+    <span><b>Z lift between points</b> <span class="new">renamed</span></span><input value="1.0 mm">
+    <span><b>First probe max depth</b> <span class="new">renamed</span></span><input value="3.0 mm">
+    <span>Probe speed</span><input value="2 steps/tick">
+    <span>Job-based points</span><span><input type="checkbox" checked> coarse every <input style="width:50px" value="3"></span></div>
+   <div class="row"><span class="btn sm">Use job size</span></div>
+   <div style="font-size:12px;color:var(--mute);margin-top:4px">54 points · ≈ 6 min</div></div>
+  <div class="box"><h4>3. Measure and apply</h4>
+   <div class="row"><span class="btn g">▶ Start auto-level</span><span class="btn r">■ Stop</span></div>
+   <div style="font-size:12px;margin-top:6px">Point 23 / 54 · 2:41 left</div>
+   <div class="row"><span class="btn sm">Save map…</span><span class="btn sm">Load map…</span><span class="btn sm">Clear</span></div>
+   <div style="font-size:12px;margin-top:6px"><input type="checkbox" checked> Apply height map to the job</div>
+   <div style="font-size:12px;color:var(--mute);margin-top:4px">Auto-saved: map_2026-11-17_1041.json</div></div>
+ </div>
+</div>
+<p class="note">Hover help: <b>Z lift between points</b> — how far the tool rises above the last touch before moving to the next point. <b>First probe max depth</b> — how far the first probe may go down looking for the copper.</p>
+
+<!-- ================= DIALOGS ================= -->
+<h2>4. Help ▸ About and Help ▸ Check for updates</h2>
+<div class="dd">
+ <div class="dlg"><div class="t">About MicroCNC</div><div class="b">
+  <div style="display:flex;gap:14px"><div class="logo">μC</div><div>
+   <div style="font-size:18px;font-weight:700">MicroCNC 0.3.0</div>
+   <div style="color:var(--mute)">Control software for PCB milling &amp; CNC</div>
+   <div style="margin-top:8px">© 2026 Microchip Solutions (Pvt) Ltd</div>
+   <div><a>www.microchip.lk/microcnc</a></div></div></div>
+  <div class="mono" style="background:#11161b;border-radius:4px;margin-top:12px">Build 2026-11-17 · Windows 11 x64<br>Python 3.14.6 · Qt 6.x · shapely 2.x · OpenCV 4.x</div>
+  <div class="row" style="justify-content:flex-end"><span class="btn sm" style="flex:0">Copy info</span><span class="btn sm" style="flex:0">Licenses</span><span class="btn p sm" style="flex:0">Close</span></div>
+ </div></div>
+ <div class="dlg"><div class="t">Check for updates</div><div class="b">
+  <div style="font-size:15px;font-weight:600;color:#7ee2a8">A new version is available</div>
+  <div class="f" style="margin-top:8px"><span>Installed</span><span>0.3.0</span><span>Latest</span><span><b>0.2.19</b> (2026-12-02)</span></div>
+  <div class="mono" style="background:#11161b;border-radius:4px;margin-top:10px">What's new:<br>• …release notes…</div>
+  <div style="font-size:12px;color:var(--mute);margin-top:8px">Download page: <a>www.microchip.lk/MicroCNC</a><br>The app never installs by itself; checking is blocked while a job runs.</div>
+  <div style="font-size:12px;margin-top:6px"><input type="checkbox" checked> Check at startup</div>
+  <div class="row" style="justify-content:flex-end"><span class="btn sm" style="flex:0">Later</span><span class="btn p sm" style="flex:0">Open download page</span></div>
+ </div></div>
+</div>
+<p class="note">Update check needs a small version file on your site, e.g. <code>www.microchip.lk/MicroCNC/latest.json</code> with {"version":"0.2.19","date":…,"notes":…}. You upload it with each release.</p>
+</body></html>

@@ -11,7 +11,7 @@ import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGridLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QSpinBox, QVBoxLayout, QWidget)
 
@@ -35,7 +35,7 @@ class AutoLevelPanel(QWidget):
         super().__init__()
         self.win = win
         self.ctl = win.ctl
-        self.hm: HeightMap | None = None
+        self.maps: dict[str, HeightMap | None] = {"top": None, "bottom": None}
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._touch_test = False
@@ -74,6 +74,13 @@ class AutoLevelPanel(QWidget):
         # ---- 2. grid
         g2 = QGroupBox("2. Grid (work coordinates)")
         f2 = QFormLayout(g2)
+        self.side_combo = QComboBox()
+        self.side_combo.addItem("Top", "top")
+        self.side_combo.addItem("Bottom", "bottom")
+        self.side_combo.setToolTip("Each board side keeps its own height map. Selecting a\n"
+                                   "layer switches to the map of its side.")
+        self.side_combo.currentIndexChanged.connect(self._side_changed)
+        f2.addRow("Map for side", self.side_combo)
         self.area = [_dspin(-500, 500, v, 2, 1) for v in (0, 0, 30, 20)]
         r = QGridLayout()
         for k, (lab, w) in enumerate(zip(("X from", "to", "Y from", "to"), self.area)):
@@ -93,10 +100,16 @@ class AutoLevelPanel(QWidget):
         self.speed.setSuffix(" steps/tick")
         self.speed.setToolTip("Z steps per probe move (one move per packet, ≈57 mm/min at 14).\n"
                               "Your machine does not report touches at 3; the original uses 14.")
-        f2.addRow("Spacing", self.spacing)
-        f2.addRow("Margin", self.margin)
-        f2.addRow("Clearance between points", self.clear_mm)
-        f2.addRow("First probe max travel", self.first_mm)
+        self.clear_mm.setToolTip("How far the tool lifts above the last touch before it moves\n"
+                                 "to the next point.")
+        self.first_mm.setToolTip("How far the first probe may go down looking for the copper.\n"
+                                 "Start with the tool no higher than this above the board.")
+        self.spacing.setToolTip("Distance between grid points")
+        self.margin.setToolTip("The grid starts this far inside the area edges")
+        f2.addRow("Point spacing", self.spacing)
+        f2.addRow("Edge margin", self.margin)
+        f2.addRow("Z lift between points", self.clear_mm)
+        f2.addRow("First probe max depth", self.first_mm)
         f2.addRow("Probe speed", self.speed)
         self.job_pts = QCheckBox("Job-based points")
         self.job_pts.setToolTip(
@@ -170,9 +183,38 @@ class AutoLevelPanel(QWidget):
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def side(self) -> str:
+        return self.side_combo.currentData() or "top"
+
+    @property
+    def hm(self) -> HeightMap | None:
+        return self.maps.get(self.side)
+
+    @hm.setter
+    def hm(self, m: HeightMap | None) -> None:
+        self.maps[self.side] = m
+
+    def set_side(self, side: str) -> None:
+        i = self.side_combo.findData(side)
+        if i >= 0 and i != self.side_combo.currentIndex() and not self.running:
+            self.side_combo.setCurrentIndex(i)
+
+    def _side_changed(self) -> None:
+        self._show_result()
+        self.win.show_heightmap(self.hm)
+        self.refresh()
+        self.win.reapply_job()
+
+    def map_for(self, side: str) -> HeightMap | None:
+        m = self.maps.get(side)
+        return m if m is not None and m.complete else None
+
     def active_map(self) -> HeightMap | None:
-        if self.apply_chk.isChecked() and self.hm is not None and self.hm.complete:
-            return self.hm
+        """Map of the side being cut (the selected layer's side), when Apply is on."""
+        side = self.win.current_side() if hasattr(self.win, "current_side") else self.side
+        if self.apply_chk.isChecked():
+            return self.map_for(side)
         return None
 
     DRIFT_LIMIT = 0.03   # mm, closing re-probe of the first point
@@ -207,8 +249,9 @@ class AutoLevelPanel(QWidget):
                               self.first_mm,
                               self.speed, self.from_job_btn, self.load_btn, self.clear_btn]:
             w.setEnabled(not self.running)
-        done = self.hm is not None and self.hm.complete
+        done = any(m is not None and m.complete for m in self.maps.values())
         self.save_btn.setEnabled(self.hm is not None and not self.running)
+        self.side_combo.setEnabled(not self.running)
         self.apply_chk.setEnabled(done and not c.job_active)
         if not done and self.apply_chk.isChecked():
             self.apply_chk.setChecked(False)
@@ -236,10 +279,42 @@ class AutoLevelPanel(QWidget):
         cuts = job_cut_points(prog) if prog is not None else None
         return AutoPlan.build(xs, ys, cuts, self._fine(), self.job_every.value())
 
+    def plan_points(self):
+        """Points the next run will probe, for the 2D preview (before measuring):
+        (x0, y0, x1, y1, [(x, y, "coarse" | "fine" | "maybe")])."""
+        import numpy as np
+        xs, ys = self._grid()
+        plan = self._plan(xs, ys)
+        a = [w.value() for w in self.area]
+        pts = []
+        if plan is None:
+            pts = [(float(x), float(y), "coarse") for y in ys for x in xs]
+        else:
+            cx, cy = plan.coarse
+            coarse = np.zeros_like(plan.first)
+            coarse[np.ix_(cy, cx)] = True
+            for j, y in enumerate(ys):
+                for i, x in enumerate(xs):
+                    if coarse[j, i]:
+                        pts.append((float(x), float(y), "coarse"))
+                    elif plan.first[j, i]:
+                        pts.append((float(x), float(y), "fine"))
+                    elif plan.need[j, i]:
+                        pts.append((float(x), float(y), "maybe"))
+        return (min(a[0], a[1]), min(a[2], a[3]), max(a[0], a[1]), max(a[2], a[3]), pts)
+
+    def preview_plan(self) -> None:
+        if hasattr(self.win, "show_probe_plan"):
+            try:
+                self.win.show_probe_plan(self.plan_points())
+            except Exception as e:   # noqa: BLE001 - preview only
+                self.win.log(f"auto-level preview: {e}")
+
     def _grid_changed(self) -> None:
         xs, ys = self._grid()
         n = len(xs) * len(ys)
         plan = self._plan(xs, ys)
+        self.preview_plan()
         if plan is None:
             self.grid_lbl.setText(f"{len(xs)} × {len(ys)} = {n} points, "
                                   f"about {n * 6 // 60 + 1} min")
@@ -363,6 +438,7 @@ class AutoLevelPanel(QWidget):
             return
         self.hm = HeightMap.empty(xs, ys)
         self.hm.meta["work_offset"] = list(self.ctl.state.work_offset[:2])
+        self.hm.meta["side"] = self.side
         self.apply_chk.setChecked(False)
         self._stop.clear()
         hm = self.hm
@@ -549,7 +625,7 @@ class AutoLevelPanel(QWidget):
             return None
         from ..settings import heightmap_dir
         try:
-            name = time.strftime("hmap-%Y%m%d-%H%M%S")
+            name = time.strftime("hmap-%Y%m%d-%H%M%S") + f"-{self.side}"
             drift = float(self.hm.meta.get("drift_mm", 0.0))
             if abs(drift) > self.DRIFT_LIMIT:
                 name += "-DRIFT"                 # closing check failed: do not use
@@ -589,15 +665,16 @@ class AutoLevelPanel(QWidget):
             self.win.log("⚠ this height map was measured before 0.2.12 - it is upside down")
             QMessageBox.warning(
                 self, "Load height map",
-                "This height map was measured before MicroPCB 0.2.12.\n\n"
+                "This height map was measured before version 0.2.12.\n\n"
                 "Older versions read the machine's Z counter the wrong way round, so its "
                 "heights are upside down (high is shown low). Do not apply it to a job - "
                 "measure the board again with auto-level.")
-        self.win.log(f"Height map loaded: {path}. Re-zero Z on the first point "
+        self.win.log(f"Height map loaded ({self.side} side): {path}. Re-zero Z on the first point "
                      f"(X {self.hm.xs[0]:.2f} Y {self.hm.ys[0]:.2f}) with 'Probe + set Z 0'.")
         self._show_result()
         self.win.show_heightmap(self.hm)
         self.refresh()
+        self.win.reapply_job()
 
     def clear(self) -> None:
         self.hm = None

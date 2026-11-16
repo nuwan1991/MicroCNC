@@ -1,6 +1,6 @@
-"""MicroPCB.exe - the machine program (PyInstaller entry point).
+"""MicroCNC.exe - the machine program (PyInstaller entry point).
 
-MicroPCB.exe --selftest <file>: import every library the program can need and
+MicroCNC.exe --selftest <file>: import every library the program can need and
 write "ok" or the error to <file> (checks a build; no window opens).
 """
 import sys

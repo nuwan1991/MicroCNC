@@ -1,4 +1,4 @@
-"""MicroPCB CAM - Gerber / drill files to G-code, no machine needed.
+"""MicroCNC CAM - Gerber / drill files to G-code, no machine needed.
 
 Split design phase 2 (docs/split-design.md). Reuses the PCB and CAM panels of
 the all-in-one window. Must not import the machine side (serial_link,
@@ -29,7 +29,7 @@ from ..ui.pcb_panel import PcbPanel
 from ..ui.pcb_view import PcbView
 from ..ui.preview import PreviewWidget
 
-APP = "MicroPCB CAM"
+APP = "MicroCNC CAM"
 
 
 def _hms(sec: float) -> str:
@@ -128,7 +128,7 @@ class CamWindow(QMainWindow):
         self.info_lbl = QLabel("Open Gerber / drill files or a ZIP to start.")
         self.statusBar().addWidget(self.info_lbl, 1)
         self.statusBar().addPermanentWidget(
-            QLabel("No machine needed - run the files with MicroPCB Control"))
+            QLabel("No machine needed - run the files with MicroCNC"))
         self._menus()
         self.log(f"{APP} {__version__}. Steps: 1. Board - Open files, "
                  "2. Operations - Generate, then Save G-code or Export per tool.")
@@ -153,7 +153,7 @@ class CamWindow(QMainWindow):
         a = QAction("About", self)
         a.triggered.connect(lambda: QMessageBox.about(
             self, APP, f"{APP} {__version__}\nGerber / Excellon to G-code for PCB milling.\n"
-                       "Run the files with MicroPCB Control."))
+                       "Run the files with MicroCNC."))
         h.addAction(a)
 
     # ------------------------------------------------------------------ used by the panels

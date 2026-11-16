@@ -56,6 +56,8 @@ class PreviewWidget(QWidget):
         self._cursor_mm: QPointF | None = None
         self._cache: QPixmap | None = None   # static paths, redrawn only on view change
         self._cache_key = None
+        self._layers: list[tuple[QPainterPath, str]] = []   # other visible layers
+        self.plan = None          # auto-level preview: (rect, [(x, y, kind)])
         self.fit()
 
     # ------------------------------------------------------------ data
@@ -116,6 +118,21 @@ class PreviewWidget(QWidget):
         m = None if xyz is None else (xyz[0], xyz[1])
         if m != self.marker:
             self.marker = m
+            self.update()
+
+    def set_layers(self, layers) -> None:
+        """Other visible job layers, drawn faint under the selected one:
+        list of (xy segment array (n, 2, 2), colour)."""
+        self._layers = [(_path(seg[:, 0], seg[:, 1]), col) for seg, col in layers]
+        self._cache = None
+        self.update()
+
+    def set_probe_plan(self, plan) -> None:
+        """Auto-level points before measuring: (x0, y0, x1, y1, [(x, y, kind)]) or None.
+        kind: "coarse" (probed), "fine" (probed near small gaps), "maybe" (only if the
+        board bends there)."""
+        if plan != self.plan:
+            self.plan = plan
             self.update()
 
     def set_heightmap(self, hm) -> None:
@@ -210,7 +227,7 @@ class PreviewWidget(QWidget):
         dpr = self.devicePixelRatioF()
         pm = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
         pm.setDevicePixelRatio(dpr)
-        pm.fill(QColor("#1e1e1e"))
+        pm.fill(QColor("#11161b"))
         p = QPainter(pm)
         big = self.tp is not None and len(self.tp) > 30000
         p.setRenderHint(QPainter.Antialiasing, not big)
@@ -220,6 +237,13 @@ class PreviewWidget(QWidget):
         if self.area is not None:
             p.setPen(pen("#9e9e9e", 1, Qt.DotLine))
             p.drawRect(self.area)
+        for path, col in self._layers:
+            c = QColor(col)
+            c.setAlpha(150)
+            q = QPen(c, 1.3)
+            q.setCosmetic(True)
+            p.setPen(q)
+            p.drawPath(path)
         p.setPen(pen("#757575", 1, Qt.DashLine))
         p.drawPath(self._rapid)
         p.setPen(pen("#42a5f5", 1.2))
@@ -252,6 +276,8 @@ class PreviewWidget(QWidget):
         p.drawText(o + QPointF(33, 4), "X")
         p.drawText(o + QPointF(-4, -33), "Y")
 
+        if self.plan is not None:
+            self._draw_plan(p)
         if self.hm is not None:
             self._draw_heightmap(p)
 
@@ -274,7 +300,7 @@ class PreviewWidget(QWidget):
         if self._cursor_mm is not None:
             c = self._cursor_mm
             p.drawText(8, self.height() - 8, f"X {c.x():.2f}  Y {c.y():.2f}")
-        p.drawText(self.width() - 300, self.height() - 8,
+        p.drawText(self.width() - 330, self.height() - 8,
                    "wheel: zoom · drag: pan · click: select · dbl-click: fit")
         p.end()
 
@@ -303,13 +329,47 @@ class PreviewWidget(QWidget):
                     p.drawText(s + QPointF(7, -6), f"{v:+.3f}")
         p.setBrush(Qt.NoBrush)
 
+    def _draw_plan(self, p: QPainter) -> None:
+        x0, y0, x1, y1, pts = self.plan
+        a, b = self._to_screen(x0, y0), self._to_screen(x1, y1)
+        blue = QColor("#58a6ff")
+        q = QPen(blue, 1, Qt.DashLine)
+        p.setPen(q)
+        p.setBrush(Qt.NoBrush)
+        p.drawRect(QRectF(a, b).normalized())
+        n = {"coarse": 0, "fine": 0, "maybe": 0}
+        for x, y, kind in pts:
+            s = self._to_screen(x, y)
+            n[kind] = n.get(kind, 0) + 1
+            if kind == "coarse":
+                p.setPen(QPen(blue, 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(s, 6, 6)
+            elif kind == "fine":
+                p.setPen(Qt.NoPen)
+                p.setBrush(blue)
+                p.drawEllipse(s, 3.5, 3.5)
+            else:
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor("#5b6672"))
+                p.drawEllipse(s, 2, 2)
+        p.setBrush(Qt.NoBrush)
+        if self.hm is None:
+            txt = f"Auto-level preview: ○ {n['coarse']} grid"
+            if n["fine"]:
+                txt += f" · ● {n['fine']} small-gap"
+            if n["maybe"]:
+                txt += f" · {n['maybe']} only if the board bends"
+            p.setPen(blue)
+            p.drawText(8, 34, txt)
+
     def _draw_grid(self, p: QPainter, pen) -> None:
         if self._scale < 2:
             return
         tl = self._to_mm(QPointF(0, 0))
         br = self._to_mm(QPointF(self.width(), self.height()))
         step = 10.0 if self._scale < 20 else 1.0
-        p.setPen(pen("#2e2e2e", 1))
+        p.setPen(pen("#1f272f", 1))
         x = (tl.x() // step) * step
         while x <= br.x():
             p.drawLine(QPointF(x, br.y()), QPointF(x, tl.y()))

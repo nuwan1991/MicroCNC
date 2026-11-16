@@ -1,4 +1,4 @@
-# PyInstaller spec: two programs (MicroPCB, MicroPCB-CAM) in one folder.
+# PyInstaller spec: two programs (MicroCNC, MicroCNC-CAM) in one folder.
 # Build with packaging\build_installer.ps1 (runs this, then Inno Setup).
 # -*- mode: python -*-
 import os
@@ -26,9 +26,9 @@ def exe(a, name):
                console=False, upx=False)
 
 
-e_main = exe(a_main, "MicroPCB")
-e_cam = exe(a_cam, "MicroPCB-CAM")
+e_main = exe(a_main, "MicroCNC")
+e_cam = exe(a_cam, "MicroCNC-CAM")
 
 coll = COLLECT(e_main, a_main.binaries, a_main.datas,
                e_cam, a_cam.binaries, a_cam.datas,
-               name="MicroPCB", upx=False)
+               name="MicroCNC", upx=False)

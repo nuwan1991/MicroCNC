@@ -1,0 +1,6 @@
+{
+  "version": "0.3.0",
+  "date": "2026-11-17",
+  "notes": "MicroCNC 0.3.0: new window layout, job layers and projects, Top / Bottom height maps, auto-level point preview, Go to X/Y/Z, 0.004 and 5 mm jog steps, jog speed in %, Help menu with user guide and update check.",
+  "url": "https://www.microchip.lk/MicroCNC"
+}

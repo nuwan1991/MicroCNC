@@ -45,6 +45,9 @@ class Settings:
     jog_low_z_mm: float = 0.5             # "low" = work Z below this
     autosave_heightmaps: bool = True      # save every finished auto-level run
     heightmap_dir: str = ""               # "" = Documents/MicroPCB height maps
+    check_updates: bool = True            # Help > Check for updates also at startup
+    jog_speed_pct: int = 100              # jog speed slider, % of max_steps_per_tick
+    last_project: str = ""
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

@@ -522,7 +522,7 @@ class CamPanel(QWidget):
         pb, _, side, _, _ = self._last
         pcb = self.win.pcb
         return cam.job_info(pb, ops, side, [os.path.basename(pcb.source or "")],
-                            f"MicroPCB {__version__}")
+                            f"MicroCNC {__version__}")
 
     def export_per_tool(self) -> None:
         """One .nc per tool + side files + job list (docs/split-design.md section 10)."""
