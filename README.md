@@ -27,6 +27,14 @@ MicroPCB CAM - Gerber / drill to G-code, no machine needed
 ```
 .venv\Scripts\python -m micropcb.apps.cam
 ```
+Windows installer (MicroPCB + MicroPCB CAM, Start menu shortcuts, uninstaller) -
+needs PyInstaller in the .venv and Inno Setup 6:
+```
+powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
+```
+Output: `dist\installer\MicroPCB-Setup-<version>.exe`. Check a build without opening a
+window: `MicroPCB.exe --selftest result.txt` (writes "ok …" or the error).
+
 Bridge for the original Wegstr software (auto-level fix / simulated machine),
 see [bridge guide](docs/bridge-guide.md):
 ```
