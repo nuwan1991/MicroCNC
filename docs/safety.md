@@ -1,7 +1,7 @@
 # MicroPCB – safety features and checks
 
 Everything MicroPCB checks or does to protect the bit, the board and the machine,
-as of version 0.2.15. **Switch** = can be turned off in *Settings* (all are on
+as of version 0.2.16. **Switch** = can be turned off in *Settings* (all are on
 by default). Everything else is always on.
 
 ## 1. Before a job runs
@@ -38,6 +38,7 @@ by default). Everything else is always on.
 | Job origin: front-left corner = work 0 | Shifts the job so its first cut is at work 0 (travel moves are ignored). |
 | Max cut depth | Cuts deeper than the limit are raised to it (V-bit: a deeper cut is a wider groove that eats thin tracks). Off for drill / cutout files. |
 | Height map (auto-level) | Added after the depth limit, so the depth stays the same below the copper everywhere. |
+| Run part (⟦ Start here / End here ⟧ on the simulation bar) | Runs only those G-code lines: Z up to the safe height, X/Y to the start, spindle on again (with spin-up) if it is on at that point of the job, down (the last part into the copper slowly), and at the end Z up to the safe height and spindle off. The Run question says "Only PART of the job". Another file = whole job again. |
 
 ## 4. While a job runs
 

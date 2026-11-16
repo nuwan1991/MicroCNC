@@ -131,3 +131,39 @@ def test_low_z_xy_jog_warning(monkeypatch):
         w.settings.jog_low_z_warning = True
         w.ctl.disconnect()
         w.close()
+
+
+def test_run_part_buttons_from_simulation_bar():
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import micropcb.ui.main_window as mw
+    from test_gcode_planner import JOB
+    w = mw.MainWindow()
+    keep = (w.settings.job_origin, w.settings.job_max_depth)
+    w.origin_combo.setCurrentIndex(w.origin_combo.findData("file"))
+    w.depth_chk.setChecked(False)
+    try:
+        w.load_job_text(JOB, "job.nc")
+        tl = w.timeline
+        w._set_play_idx(tl.index_for_line(7))
+        w._set_range_end(0)
+        w._set_play_idx(w.timeline.index_for_line(9) + 1)   # timeline of the part now
+        w._set_range_end(1)
+        assert w.ctl.job_range == (7, 9)
+        cut_x = [m.end[0] for m in w.job_prog_raw.lines() if m.end[2] < 0]
+        assert min(cut_x) >= 20                       # preview shows only the part
+        assert "7" in w.range_lbl.text() and "9" in w.range_lbl.text()
+        w.depth_chk.setChecked(True)                  # other job options keep the range
+        assert w.ctl.job_range == (7, 9)
+        w.depth_chk.setChecked(False)
+        w._clear_range()
+        assert w.ctl.job_range is None
+        assert min(m.end[0] for m in w.job_prog_raw.lines() if m.end[2] < 0) < 10
+        w.ctl.job_range = (7, 9)
+        w.load_job_text("G0 X1\nG1 Z-0.1 F50\nG1 X2 F100\n", "other.nc")   # new file
+        assert w.ctl.job_range is None
+    finally:
+        w.settings.job_origin, w.settings.job_max_depth = keep
+        w.close()

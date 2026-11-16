@@ -415,3 +415,34 @@ def test_resume_safety_switches_off_keep_old_behaviour(ctl):
     ctl.resume_job()
     assert _wait(lambda: job.state == DONE, 30)
     assert ctl.sim.pos[0] == 7500
+
+
+# ------------------------------------------------------------------ run part (0.2.16)
+JOB = "G0 Z1\nM3\nG0 X5\nG1 Z-0.1 F60\nG1 X10 F150\nG0 Z1\nG0 X20\nG1 Z-0.1 F60\nG1 X25 F150\nG0 Z1\nM5\n"
+
+
+def test_program_range_safe_start_and_end():
+    from micropcb.gcode import LINE, SPINDLE, program_range
+    prog = parse(JOB, (0.0, 0.0, 0.0))
+    part = program_range(prog, 7, 9, safe_z=5.0)          # second cut only
+    lines = [m for m in part.moves if m.kind == LINE]
+    assert lines[0].start == (0.0, 0.0, 0.0) and lines[0].end == (0.0, 0.0, 5.0)  # up first
+    assert lines[1].end == (10.0, 0.0, 5.0)                # to the start of line 7 at safe Z
+    sp = [m for m in part.moves if m.kind == SPINDLE]
+    assert sp[0].value is True and sp[-1].value is False   # spindle was on there
+    cut_x = [m.end[0] for m in lines if m.end[2] < 0]
+    assert min(cut_x) >= 20 and max(cut_x) == 25           # the first cut is not repeated
+    assert lines[-1].end[2] == 5.0                         # ends at safe height
+
+
+def test_controller_runs_only_the_part(ctl):
+    ctl.zero_axes()
+    ctl.job_range = (7, 9)
+    samples, stop = _sampler(ctl)
+    job = ctl.start_job(JOB)
+    assert _wait(lambda: job.state == DONE, 30)
+    stop.set()
+    low_x = [p[0] for p, _ in samples if p[2] < 0]
+    assert low_x and min(low_x) >= 20 * 250 and max(low_x) == 25 * 250
+    assert all(on for p, on in samples if p[2] < 0)        # spindle on whenever in the copper
+    assert not ctl.sim.spindle and ctl.sim.pos[2] == 5 * 250

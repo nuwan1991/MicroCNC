@@ -115,6 +115,66 @@ def limit_depth(prog: Program, max_depth: float) -> tuple[Program, int, float]:
     return out, n, deepest
 
 
+def program_range(prog: Program, first_line: int, last_line: int,
+                  safe_z: float = 5.0, plunge_feed: float = 60.0) -> Program:
+    """Only the moves of source lines first_line..last_line, with a safe start and
+    end ("re-run the part that did not engrave"):
+
+    start: Z up to safe_z, X/Y to the first move, spindle on again if it was on at
+    that point of the job, down to the start Z (the last part into the copper at
+    plunge_feed); end: Z up to safe_z, spindle off. Positions are work mm; the
+    program must have been parsed from the machine's current position."""
+    if first_line > last_line:
+        first_line, last_line = last_line, first_line
+    lines = [m for m in prog.moves if m.kind == LINE]
+    if not lines:
+        raise ValueError("the job has no moves")
+    sel = [k for k, m in enumerate(prog.moves) if first_line <= m.line <= last_line
+           and m.kind != END]
+    first = next((prog.moves[k] for k in sel if prog.moves[k].kind == LINE), None)
+    if first is None:
+        raise ValueError(f"no moves between line {first_line} and {last_line}")
+    spindle = False
+    for m in prog.moves[:sel[0]]:
+        if m.kind == SPINDLE:
+            spindle = bool(m.value)
+    out = Program(warnings=list(prog.warnings), line_count=prog.line_count,
+                  max_feed=prog.max_feed, uses_spindle=prog.uses_spindle)
+    ln = first.line
+    cur = lines[0].start                       # where the machine is
+    sx, sy, sz = first.start
+    hz = max(cur[2], safe_z, sz)
+    pts = [(cur[0], cur[1], hz), (sx, sy, hz)]
+    p = cur
+    for q in pts:
+        if q != p:
+            out.moves.append(Move(LINE, ln, p, q, rapid=True))
+            p = q
+    if spindle:
+        out.moves.append(Move(SPINDLE, ln, value=True))   # planner waits for spin-up
+    near = (sx, sy, max(sz, min(0.2, hz)))
+    if near != p:
+        out.moves.append(Move(LINE, ln, p, near, rapid=True))
+        p = near
+    if (sx, sy, sz) != p:
+        out.moves.append(Move(LINE, ln, p, (sx, sy, sz), feed=plunge_feed))
+        p = (sx, sy, sz)
+    for k in sel:
+        m = prog.moves[k]
+        out.moves.append(m)
+        if m.kind == LINE:
+            p = m.end
+        elif m.kind == SPINDLE:
+            spindle = bool(m.value)
+    up = (p[0], p[1], max(p[2], safe_z))
+    if up != p:
+        out.moves.append(Move(LINE, last_line, p, up, rapid=True))
+    if spindle:
+        out.moves.append(Move(SPINDLE, last_line, value=False))
+    out.moves.append(Move(END, last_line))
+    return out
+
+
 class GCodeError(ValueError):
     pass
 
