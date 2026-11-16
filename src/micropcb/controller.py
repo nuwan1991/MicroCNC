@@ -32,6 +32,9 @@ EV_STATE = "state"  # controller-level: something about position validity change
 EV_JOB = "job"      # payload: Job (state changed)
 
 
+SPINUP_RESUME_SECONDS = 2.0   # spindle restarted on resume: wait before cutting
+
+
 class MachineController:
     def __init__(self, settings: Settings | None = None, state: MachineState | None = None,
                  listener: Callable[[str, object], None] | None = None,
@@ -703,18 +706,39 @@ class MachineController:
                 pl.shift(0, 0, dz)                       # remaining path follows new Z zero
                 pl.cur[2] += dz
                 self._pause_offset = list(self.state.work_offset)
-            target = list(pl.cur)
+            st = self.settings
+            mm = self.mmps
+            safe_rel = round(st.safe_height_mm / mm(2))
+            # paused above the copper: go to the next cut at safe height (not back
+            # down to where it stopped first) - user request 2026-11-16
+            air = pl.air_resume_target() if st.resume_via_safe_height else None
+            target = list(air[1]) if air else list(pl.cur)
             pos = list(self.link.position)
-            if pos != target:
-                mm = self.mmps
-                safe = max(pos[2], target[2]) + round(self.settings.safe_height_mm / mm(2))
+            # spindle switched off during the pause: start it again (and let it spin
+            # up) above the work before going back down
+            spin = st.resume_restart_spindle and pl.spindle and not self.link.spindle
+            if pos != target or spin:
+                if air:
+                    safe = max(pos[2], self.state.work_offset[2] + safe_rel, target[2])
+                else:
+                    safe = max(pos[2], target[2]) + safe_rel
                 self._move_steps("z", safe - pos[2])
+                if spin:
+                    if not self.wait_idle(60):
+                        raise RuntimeError("lift before spindle start did not finish")
+                    self.link.set_spindle(True)
+                    time.sleep(SPINUP_RESUME_SECONDS)
+                    self.probe_log.append("resume: spindle was off - started it again")
                 self._move_steps("x", target[0] - pos[0])
                 self._move_steps("y", target[1] - pos[1])
                 self._move_steps("z", target[2] - safe)
                 if not self.wait_idle(120):
                     raise RuntimeError("return to the path did not finish")
                 pl.cur = list(self.link.position)
+            if air:
+                pl.skip_to(air[0])
+                self.probe_log.append("resume: paused above the copper - went to the next "
+                                      "cut at safe height")
         job.resume()  # type: ignore[union-attr]
 
     def _move_steps(self, axis: str, steps: int) -> None:

@@ -329,3 +329,89 @@ def test_jog_allowed_only_when_paused(ctl):
     ctl.resume_job()                 # returns Y to the path first
     assert _wait(lambda: job.state == DONE)
     assert ctl.sim.pos[:2] == [0, 0]
+
+
+
+# ------------------------------------------------------------------ safer resume (0.2.15)
+def _sampler(ctl):
+    """Record (position, spindle) after every packet the simulator executes."""
+    import threading
+    samples, stop = [], threading.Event()
+    orig = ctl.sim.write
+
+    def write(data):
+        n = orig(data)
+        if not stop.is_set():
+            samples.append((tuple(ctl.sim.pos), ctl.sim.spindle))
+        return n
+    ctl.sim.write = write
+    return samples, stop
+
+
+def test_resume_in_air_goes_to_next_cut_at_safe_height(ctl):
+    """Paused on a travel move above the copper, Z lifted by hand: resume must
+    not come back down to where it stopped - safe height, next cut, then down."""
+    ctl.zero_axes()
+    job = ctl.start_job("G0 Z1\nG0 X30\nG1 Z-0.1 F60\nG1 X35 F150\nG0 Z1")
+    assert _wait(lambda: ctl.sim.pos[0] > 1000)
+    ctl.pause_job()
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    x_pause = ctl.sim.pos[0]
+    assert ctl.sim.pos[2] == 250 and x_pause < 7500
+    ctl.jog("z", 3)
+    ctl.wait_idle(10)
+    samples, stop = _sampler(ctl)
+    ctl.resume_job()
+    assert _wait(lambda: job.state == DONE, 30)
+    stop.set()
+    assert ctl.sim.pos[0] == 35 * 250
+    safe = round(ctl.settings.safe_height_mm / 0.004)
+    # while travelling to X 30 the tool stayed at the safe height (not at Z 1)
+    travel = [p for p, _ in samples if x_pause < p[0] < 7500]
+    assert travel and min(p[2] for p in travel) >= safe
+
+
+def test_resume_in_cut_returns_to_the_cut(ctl):
+    ctl.zero_axes()
+    job = ctl.start_job("G1 Z-0.1 F60\nG1 X30 F150\nG0 Z1")
+    assert _wait(lambda: ctl.sim.pos[0] > 1000)
+    ctl.pause_job()
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    x_pause = ctl.sim.pos[0]
+    ctl.jog("z", 3)
+    ctl.wait_idle(10)
+    ctl.resume_job()
+    assert _wait(lambda: job.state == DONE, 30)
+    assert ctl.sim.pos[0] == 7500 and x_pause < 7500   # finished the cut
+
+
+def test_resume_restarts_spindle_before_going_down(ctl):
+    """Spindle switched off by hand during a pause in the cut: resume starts it
+    again above the work, before the tool goes back into the copper."""
+    ctl.zero_axes()
+    job = ctl.start_job("M3\nG1 Z-0.1 F60\nG1 X30 F150\nG0 Z1\nM5")
+    assert _wait(lambda: ctl.sim.pos[0] > 1000)
+    ctl.pause_job()
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    ctl.set_spindle(False)
+    ctl.wait_idle(5)
+    assert not ctl.sim.spindle
+    samples, stop = _sampler(ctl)
+    ctl.resume_job()
+    assert _wait(lambda: job.state == DONE, 30)
+    stop.set()
+    first_up = next(i for i, (p, _) in enumerate(samples) if p[2] > 0)
+    low = [on for p, on in samples[first_up:] if p[2] < 0]
+    assert low and all(low)          # never back in the copper with the spindle off
+
+
+def test_resume_safety_switches_off_keep_old_behaviour(ctl):
+    ctl.settings.resume_via_safe_height = False
+    ctl.zero_axes()
+    job = ctl.start_job("G0 Z1\nG0 X30\nG1 Z-0.1 F60\nG0 Z1")
+    assert _wait(lambda: ctl.sim.pos[0] > 1000)
+    ctl.pause_job()
+    assert _wait(lambda: job.state == PAUSED_STATE)
+    ctl.resume_job()
+    assert _wait(lambda: job.state == DONE, 30)
+    assert ctl.sim.pos[0] == 7500

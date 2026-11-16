@@ -660,7 +660,39 @@ class MainWindow(QMainWindow):
         self.ctl.emergency_stop()
         self.log("E-STOP: motion stopped, spindle off")
 
+    _low_z_ok = False   # user accepted X/Y moves with the tool low (until Z goes up)
+
+    def _xy_jog_allowed(self, axis: str) -> bool:
+        """Ask before an X/Y jog with the tool at / near / below work Z 0: a
+        sideways move there drags the bit through the board and breaks it."""
+        s = self.settings
+        if axis == "z" or not s.jog_low_z_warning or not self.ctl.connected:
+            return True
+        z = self.ctl.work_mm()[2]
+        if z >= s.jog_low_z_mm:
+            self._low_z_ok = False
+            return True
+        if self._low_z_ok:
+            return True
+        box = QMessageBox(QMessageBox.Warning, "Tool is low",
+                          f"The tool is at work Z {z:+.3f} mm (below {s.jog_low_z_mm:g} mm).\n\n"
+                          f"Moving {axis.upper()} now can drag the bit across the board and "
+                          "break it. Lift Z first, or move anyway?\n\n"
+                          "(Asked again after Z has been above the limit. Switch off in "
+                          "Settings.)", parent=self)
+        lift = box.addButton("Cancel - I will lift Z", QMessageBox.RejectRole)
+        go = box.addButton(f"Move {axis.upper()} anyway", QMessageBox.AcceptRole)
+        box.setDefaultButton(lift)
+        box.exec()
+        if box.clickedButton() is go:
+            self._low_z_ok = True
+            self.log(f"⚠ {axis.upper()} jog with the tool low (Z {z:+.3f} mm) - accepted")
+            return True
+        return False
+
     def _step_jog(self, axis: str, d: int) -> None:
+        if not self._xy_jog_allowed(axis):
+            return
         step = STEP_SIZES[self.step_group.checkedId()]
         self._do(lambda: self._report_clamp(axis, d * step, self.ctl.jog(axis, d * step, self.speed.value())))
 
@@ -1298,6 +1330,8 @@ class MainWindow(QMainWindow):
             return True
         axis, d = JOG_KEYS[key]
         if t == QEvent.KeyPress and self._held_key is None:
+            if not self._xy_jog_allowed(axis):
+                return True
             self._held_key = key
             self._do(lambda: self.ctl.jog_continuous(axis, d, self.speed.value()))
         elif t == QEvent.KeyRelease and key == self._held_key:

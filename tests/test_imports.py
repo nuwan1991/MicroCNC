@@ -77,3 +77,57 @@ def test_cam_window_show_one_op_and_narrow_checks():
         assert len(w.tp.program.lines()) == n_all
     finally:
         w.close()
+
+
+def test_low_z_xy_jog_warning(monkeypatch):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    import micropcb.ui.main_window as mw
+    from micropcb.sim_machine import SimMachine
+    from micropcb.ui.settings_dialog import SettingsDialog
+    answer = {"go": False, "asked": 0}
+
+    class FakeBox:
+        Warning, RejectRole, AcceptRole = 0, 0, 1
+
+        def __init__(self, *a, **k):
+            self._b = []
+
+        def addButton(self, text, role):
+            self._b.append(text)
+            return text
+
+        def setDefaultButton(self, b):
+            pass
+
+        def exec(self):
+            answer["asked"] += 1
+
+        def clickedButton(self):
+            return self._b[1] if answer["go"] else self._b[0]
+
+    w = mw.MainWindow()
+    try:
+        w.ctl.connect(transport=SimMachine(realtime=False))
+        w.ctl.zero_axes()
+        monkeypatch.setattr(mw, "QMessageBox", FakeBox)
+        assert w._xy_jog_allowed("z")                      # Z is never asked
+        assert not w._xy_jog_allowed("x") and answer["asked"] == 1   # Z 0: cancel
+        answer["go"] = True
+        assert w._xy_jog_allowed("y") and w._xy_jog_allowed("x")
+        assert answer["asked"] == 2                        # accepted: not asked again
+        w.ctl.jog("z", 1)
+        w.ctl.wait_idle(5)
+        assert w._xy_jog_allowed("x") and not w._low_z_ok   # high: no question, reset
+        w.settings.jog_low_z_warning = False
+        w.ctl.jog("z", -1)
+        w.ctl.wait_idle(5)
+        assert w._xy_jog_allowed("x") and answer["asked"] == 2   # switched off
+        d = SettingsDialog(w.settings, w)
+        assert not d.low_warn.isChecked() and d.res_safe.isChecked()
+    finally:
+        w.settings.jog_low_z_warning = True
+        w.ctl.disconnect()
+        w.close()

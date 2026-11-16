@@ -50,6 +50,21 @@ class SettingsDialog(QDialog):
         self.reconnect.setChecked(settings.auto_reconnect)
         form.addRow("Auto reconnect", self.reconnect)
 
+        # ---- safety switches (all on by default; docs/safety.md)
+        self.res_safe = QCheckBox("Paused above the copper: resume at safe height to the "
+                                  "next cut")
+        self.res_safe.setChecked(settings.resume_via_safe_height)
+        form.addRow("Resume", self.res_safe)
+        self.res_spin = QCheckBox("Spindle switched off during a pause: start it again "
+                                  "before going down")
+        self.res_spin.setChecked(settings.resume_restart_spindle)
+        form.addRow("", self.res_spin)
+        self.low_warn = QCheckBox("Ask before an X/Y jog when the tool is below")
+        self.low_warn.setChecked(settings.jog_low_z_warning)
+        self.low_mm = _dspin(0, 10, settings.jog_low_z_mm, 2, 0.1)
+        self.low_mm.setSuffix(" mm")
+        form.addRow("Low tool warning", self._row([self.low_warn, self.low_mm]))
+
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._accept)
         bb.rejected.connect(self.reject)
@@ -74,4 +89,8 @@ class SettingsDialog(QDialog):
         s.safe_height_mm = self.safe.value()
         s.soft_limits = self.limits.isChecked()
         s.auto_reconnect = self.reconnect.isChecked()
+        s.resume_via_safe_height = self.res_safe.isChecked()
+        s.resume_restart_spindle = self.res_spin.isChecked()
+        s.jog_low_z_warning = self.low_warn.isChecked()
+        s.jog_low_z_mm = self.low_mm.value()
         self.accept()

@@ -30,6 +30,11 @@ class Settings:
     last_dir: str = ""
     view_quality: str = "full"      # full | light | 2d
     check_max_depth_mm: float = 2.0
+    # safety switches (Settings dialog; all on by default)
+    resume_via_safe_height: bool = True   # paused above copper: resume at safe Z to next cut
+    resume_restart_spindle: bool = True   # spindle off during pause: restart before going down
+    jog_low_z_warning: bool = True        # ask before X/Y jog with the tool low
+    jog_low_z_mm: float = 0.5             # "low" = work Z below this
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Settings":

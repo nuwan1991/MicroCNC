@@ -60,6 +60,8 @@ class Planner:
         self.cur = list(start_steps)        # commanded step position
         self.spindle = False
         self._pause = threading.Event()
+        self._paused_at = None   # (run, j, s) while a user pause holds inside a run
+        self._skip_to = None     # segment index to continue from after the pause
         self._blocks = self._build()
 
     # ------------------------------------------------------------ public
@@ -93,6 +95,33 @@ class Planner:
             self.spindle = False
             yield TICK, Tick(spindle=False), last_line
         yield FINISHED, None, last_line
+
+    def air_resume_target(self) -> tuple[int, list[int]] | None:
+        """Paused with the tool above the copper (work Z >= 0)? Then the moves
+        up to the next cut are only travel: returns (segment index, step position
+        where that cut starts) so the resume can go there at safe height. None
+        when paused in the copper or when there is no later cut in this run."""
+        if self._paused_at is None:
+            return None
+        run, j, s = self._paused_at
+        oz = self.offset_mm[2]
+        seg = run[j]
+        if seg.p0[2] + seg.u[2] * s - oz < -1e-6:
+            return None                                  # in the middle of a cut
+        for k in range(j, len(run)):
+            sg = run[k]
+            z0 = sg.p0[2] - oz
+            z1 = sg.p0[2] + sg.u[2] * sg.length - oz
+            if min(z0, z1) < -1e-6:                      # first move into the copper
+                if k == j:
+                    return None                          # already on that plunge
+                return k, self._target_steps(sg, 0.0)
+        return None
+
+    def skip_to(self, k: int) -> None:
+        """After air_resume_target: continue the paused run at segment k (the
+        machine has been moved to its start)."""
+        self._skip_to = k
 
     def shift(self, dx: int, dy: int, dz: int) -> None:
         """Move the not-yet-executed path by whole steps (work zero changed
@@ -227,7 +256,13 @@ class Planner:
                     # stopped on the path: make the step position exact, then pause
                     yield from self._catch_up(self._target_steps(seg, s), seg.line)
                     self._pause.clear()
+                    self._paused_at = (run, j, s)
                     yield PAUSED, "", seg.line
+                    self._paused_at = None
+                    if self._skip_to is not None:     # resumed at safe height (air)
+                        j, s = self._skip_to, 0.0
+                        self._skip_to = None
+                        seg = run[j]
                     v = 0.0
                     continue
             else:
